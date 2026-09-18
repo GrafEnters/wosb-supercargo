@@ -5,6 +5,7 @@
   python -m supercargo parse FILE   parse a screenshot file (debug)
 """
 import argparse
+import re
 import ctypes
 import ctypes.wintypes as wt
 import sys
@@ -52,6 +53,8 @@ def capture_once(store: Store, args) -> bool:
         print(f"\n[x] Подсказка порта не найдена ({e}). Скриншот: {path}")
         return False
     crop.save(DEBUG_DIR / "last_tooltip.png")
+    (DEBUG_DIR / "tooltips").mkdir(exist_ok=True)
+    crop.save(DEBUG_DIR / "tooltips" / f"{re.sub(r'[^\w\- ]', '_', info.name)}.png")
     if not info.goods:
         print_port(info)
         return False

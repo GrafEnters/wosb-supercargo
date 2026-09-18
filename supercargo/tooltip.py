@@ -10,7 +10,7 @@ from . import numocr, ocr
 from .ocr import Line, Word
 
 KNOWN_GOODS = [
-    "Древесина", "Ром", "Ткань", "Зерно", "Смола", "Свежее мясо", "Вода", "Медь",
+    "Древесина", "Ром", "Ткань", "Зерно", "Смола", "Свежее мясо", "Вода", "Медь", "Уголь",
 ]
 
 
@@ -152,9 +152,12 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
 
         if vol_words:
             vx0 = min(w.x for w in vol_words) - 2
-            vx1 = max(w.x + w.w for w in vol_words) + 2
+            # Windows OCR word boxes sometimes stop before "k)": read up to the price column instead.
+            vx1 = buy_hdr.x - 6
             t, _ = cell(vx0, vx1)
             g.stock = numocr.parse_number(t)
+            if g.stock is not None and g.stock < 1000:
+                g.warnings.append(f"stock: suspicious '{t}'")
         for attr, x0 in (("buy", buy_hdr.x - 4), ("sell", sell_hdr.x - 4)):
             t, score = cell(x0, x0 + col_gap - 10)
             v = numocr.parse_number(t)
