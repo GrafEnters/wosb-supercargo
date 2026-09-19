@@ -1,8 +1,9 @@
 """Map window: scan ports with the hotkey, see progress on the map, get routes drawn as arrows.
 
-Two modes:
+Modes:
   collect - after "Обновить данные": every known port is gray until rescanned, then gets a green check;
-  routes  - best routes drawn as arrows on the map, no scan markers.
+  routes  - best routes drawn as arrows on the map, no scan markers;
+  edit    - "Двигать порты": drag port markers to fix their positions (saved to ports_layout.json).
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -133,6 +134,12 @@ class App(tk.Tk):
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<Button-3>", self.on_right_click)
+        self.canvas.bind("<ButtonPress-1>", self.on_drag_start)
+        self.canvas.bind("<B1-Motion>", self.on_drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self.on_drag_end)
+        self.drag: dict | None = None
+        self.tag_of: dict[str, str] = {}
+        self.name_of: dict[str, str] = {}
 
         side = tk.Frame(self, bg="#262626", width=440)
         side.pack(side=tk.RIGHT, fill=tk.Y)
@@ -150,6 +157,8 @@ class App(tk.Tk):
         btns.pack(fill=tk.X, padx=12, pady=10)
         ttk.Button(btns, text="Обновить данные", command=self.refresh).pack(side=tk.LEFT)
         ttk.Button(btns, text="Построить сейчас", command=self.build_routes).pack(side=tk.LEFT, padx=6)
+        self.edit_btn = ttk.Button(btns, text="Двигать порты", command=self.toggle_edit)
+        self.edit_btn.pack(side=tk.LEFT)
 
         sort_row = tk.Frame(side, bg="#262626")
         sort_row.pack(fill=tk.X, padx=12)
@@ -165,13 +174,18 @@ class App(tk.Tk):
         self.route_list.bind("<<ListboxSelect>>", self.on_select)
 
     def all_scanned(self) -> bool:
-        names = list(self.store.ports)
+        names = self.store.all_names()
         return len(names) >= 2 and all(self.store.is_scanned(n) for n in names)
 
     def update_status(self):
-        names = list(self.store.ports)
+        names = self.store.all_names()
         done = sum(self.store.is_scanned(n) for n in names)
-        if self.mode == "collect":
+        if self.mode == "edit":
+            self.status.config(text=f"Расположение портов: {len(names)}")
+            hint = ("Перетаскивай порты мышью на их значки - позиция сохраняется сразу "
+                    "(supercargo/ports_layout.json). ПКМ по порту - удалить. "
+                    "Нажми «Готово», чтобы вернуться.")
+        elif self.mode == "collect":
             self.status.config(text=f"Сбор данных: {done} / {len(names)} портов")
             if not names:
                 hint = f"Открой карту в игре, наведи курсор на порт и нажми {self.key}. Каждый новый порт добавится на карту."
@@ -195,9 +209,15 @@ class App(tk.Tk):
             DATA_DIR.mkdir(exist_ok=True)
             view.save(BACKGROUND)
 
-    def view_xy(self, port: dict):
+    def view_xy(self, name: str):
         """Port position in background-view pixels."""
-        return self.cell_to_view(port["map_xy"]) if port.get("map_xy") else None
+        xy = self.store.position(name)
+        return self.cell_to_view(xy) if xy else None
+
+    def canvas_to_cells(self, x, y):
+        s, ox, oy = self._transform()
+        bx0, by0, _, _ = mapgeo.bounds()
+        return (x - ox) / s / VIEW_PX_PER_CELL + bx0, (y - oy) / s / VIEW_PX_PER_CELL + by0
 
     @staticmethod
     def cell_to_view(xy):
@@ -216,6 +236,14 @@ class App(tk.Tk):
         return pos[0] * s + ox, pos[1] * s + oy
 
     # ---------- drawing ----------
+    def port_tag(self, name: str) -> str:
+        """Canvas tag for all items of one port (port names contain spaces, which tags can't)."""
+        tag = self.tag_of.get(name)
+        if tag is None:
+            tag = self.tag_of[name] = f"p{len(self.tag_of)}"
+            self.name_of[tag] = name
+        return tag
+
     def redraw(self):
         c = self.canvas
         c.delete("all")
@@ -230,11 +258,14 @@ class App(tk.Tk):
             c.create_text(c.winfo_width() / 2, c.winfo_height() / 2, fill="#888", font=("Segoe UI", 14),
                           text=f"Фон карты появится после первого скана ({self.key} над портом)")
 
-        if self.mode == "collect":
-            for name, p in self.store.ports.items():
-                xy = self.view_xy(p)
+        if self.mode in ("collect", "edit"):
+            for name in self.store.all_names():
+                xy = self.view_xy(name)
                 if xy:
-                    self.draw_scan_marker(name, self.to_canvas(xy), self.store.is_scanned(name))
+                    if self.mode == "edit":
+                        self.draw_edit_marker(name, self.to_canvas(xy))
+                    else:
+                        self.draw_scan_marker(name, self.to_canvas(xy), self.store.is_scanned(name))
         else:
             self.draw_routes()
 
@@ -245,12 +276,18 @@ class App(tk.Tk):
         self.update_status()
 
     def draw_scan_marker(self, name, xy, scanned):
-        c, (x, y), r = self.canvas, xy, MARKER_R
+        c, (x, y), r, tags = self.canvas, xy, MARKER_R, ("port", self.port_tag(name))
         fill, outline = ("#2a9d3f", "#dfffe6") if scanned else ("#6b6b6b", "#d0d0d0")
-        c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline, width=2, tags=("port", name))
-        c.create_text(x, y, text="✓" if scanned else "?", fill="white", font=("Segoe UI", 11, "bold"),
-                      tags=("port", name))
-        self._label(x, y + r + 9, short(name), "#111", "#f0e6c8")
+        c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline, width=2, tags=tags)
+        c.create_text(x, y, text="✓" if scanned else "?", fill="white", font=("Segoe UI", 11, "bold"), tags=tags)
+        self._label(x, y + r + 9, short(name), "#111", "#f0e6c8", tags=tags)
+
+    def draw_edit_marker(self, name, xy):
+        c, (x, y), r, tags = self.canvas, xy, 7, ("port", self.port_tag(name))
+        c.create_line(x - r - 5, y, x + r + 5, y, fill="#00e5ff", width=2, tags=tags)
+        c.create_line(x, y - r - 5, x, y + r + 5, fill="#00e5ff", width=2, tags=tags)
+        c.create_oval(x - r, y - r, x + r, y + r, outline="#00e5ff", width=2, tags=tags)
+        self._label(x, y + r + 14, short(name), "#111", "#bff6ff", tags=tags)
 
     def draw_routes(self):
         shown = list(enumerate(self.routes[:len(ROUTE_COLORS)]))
@@ -263,22 +300,23 @@ class App(tk.Tk):
             endpoints.setdefault(r.src, color)
             endpoints.setdefault(r.dst, color)
         for name, color in endpoints.items():
-            xy = self.view_xy(self.store.ports[name])
+            xy = self.view_xy(name)
             if not xy:
                 continue
             x, y = self.to_canvas(xy)
             r = MARKER_R - 2
-            self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=color, width=3, tags=("port", name))
-            self._label(x, y + r + 10, short(name), "#111", "#f0e6c8")
+            tags = ("port", self.port_tag(name))
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=color, width=3, tags=tags)
+            self._label(x, y + r + 10, short(name), "#111", "#f0e6c8", tags=tags)
 
-    def _label(self, x, y, text, fg, bg, font=("Segoe UI", 9, "bold")):
-        t = self.canvas.create_text(x, y, text=text, fill=fg, font=font)
+    def _label(self, x, y, text, fg, bg, font=("Segoe UI", 9, "bold"), tags=()):
+        t = self.canvas.create_text(x, y, text=text, fill=fg, font=font, tags=tags)
         x0, y0, x1, y1 = self.canvas.bbox(t)
-        rect = self.canvas.create_rectangle(x0 - 3, y0 - 1, x1 + 3, y1 + 1, fill=bg, outline="")
+        rect = self.canvas.create_rectangle(x0 - 3, y0 - 1, x1 + 3, y1 + 1, fill=bg, outline="", tags=tags)
         self.canvas.tag_lower(rect, t)
 
     def draw_route(self, route: router.Route, color, bold=False):
-        sp, dp = self.view_xy(self.store.ports[route.src]), self.view_xy(self.store.ports[route.dst])
+        sp, dp = self.view_xy(route.src), self.view_xy(route.dst)
         if not sp or not dp:
             return
         (x0, y0), (x1, y1) = self.to_canvas(sp), self.to_canvas(dp)
@@ -317,7 +355,57 @@ class App(tk.Tk):
         self.refresh_list()
         self.redraw()
 
+    def toggle_edit(self):
+        if self.mode == "edit":
+            self.edit_btn.config(text="Двигать порты")
+            if self.mode_before_edit == "routes":
+                self.build_routes()  # distances may have changed
+                return
+            self.mode = self.mode_before_edit
+        else:
+            self.mode_before_edit = self.mode
+            self.mode = "edit"
+            self.edit_btn.config(text="Готово")
+        self.refresh_list()
+        self.redraw()
+
+    def _port_at(self, x, y):
+        r = 9  # markers are hollow: search a small box so clicking inside the ring still hits it
+        for it in reversed(self.canvas.find_overlapping(x - r, y - r, x + r, y + r)):
+            for t in self.canvas.gettags(it):
+                if t in self.name_of:
+                    return self.name_of[t]
+        return None
+
+    def on_drag_start(self, e):
+        if self.mode != "edit":
+            return
+        name = self._port_at(e.x, e.y)
+        if name:
+            px, py = self.to_canvas(self.view_xy(name))
+            self.drag = {"name": name, "dx": px - e.x, "dy": py - e.y}
+
+    def on_drag_move(self, e):
+        if not self.drag:
+            return
+        name = self.drag["name"]
+        # Move this port's items live; the full redraw happens on release.
+        px, py = self.drag.get("pos") or self.to_canvas(self.view_xy(name))
+        nx, ny = e.x + self.drag["dx"], e.y + self.drag["dy"]
+        self.canvas.move(self.port_tag(name), nx - px, ny - py)
+        self.drag["pos"] = (nx, ny)
+
+    def on_drag_end(self, e):
+        if not self.drag:
+            return
+        d, self.drag = self.drag, None
+        if "pos" in d:
+            self.store.set_position(d["name"], self.canvas_to_cells(*d["pos"]))
+        self.redraw()
+
     def refresh(self):
+        if self.mode == "edit":
+            self.edit_btn.config(text="Двигать порты")
         self.mode = "collect"
         self.store.new_session()
         self.routes, self.selected = [], None
@@ -339,15 +427,10 @@ class App(tk.Tk):
         self.redraw()
 
     def on_right_click(self, e):
-        items = self.canvas.find_overlapping(e.x - 2, e.y - 2, e.x + 2, e.y + 2)
-        for it in items:
-            tags = self.canvas.gettags(it)
-            if "port" in tags:
-                name = [t for t in tags if t not in ("port", "current")][0]
-                if messagebox.askyesno("Забыть порт", f"Убрать «{name}» с карты и из базы?"):
-                    self.store.remove(name)
-                    self.build_routes() if self.mode == "routes" else self.redraw()
-                return
+        name = self._port_at(e.x, e.y)
+        if name and messagebox.askyesno("Забыть порт", f"Убрать «{name}» с карты и из базы?"):
+            self.store.remove(name)
+            self.build_routes() if self.mode == "routes" else self.redraw()
 
     def add_frame(self, frame: Image.Image, mask: Image.Image):
         """Background = per-pixel median over recent top-down frames, skipping each frame's tooltip area."""
@@ -386,7 +469,9 @@ class App(tk.Tk):
                     name = self.store.update(info, map_xy=map_xy)
                     print(f"scanned: {name} ({len(info.goods)} goods) at {mapgeo.cell_name(*map_xy)}")
                     self.add_frame(frame, mask)
-                    if self.mode == "routes":
+                    if self.mode == "edit":
+                        self.redraw()
+                    elif self.mode == "routes":
                         self.build_routes()  # prices changed: keep the route view up to date
                     elif self.all_scanned():
                         self.build_routes()
