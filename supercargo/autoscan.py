@@ -8,12 +8,11 @@ import queue
 import threading
 import time
 import traceback
-import winsound
 
 import numpy as np
 from PIL import Image
 
-from . import capture, mapgeo, tooltip
+from . import capture, mapgeo, sound, tooltip
 
 POLL = 0.1  # s between cursor checks
 MOVE_TOLERANCE = 6  # px of jitter that still counts as "cursor stopped"
@@ -92,5 +91,5 @@ class AutoScanner(threading.Thread):
             map_xy = geo.to_map(*cursor) if geo else None
         self.last_name, self.last_time = info.name, time.time()
         self.out.put(("scan", info, map_xy))
-        winsound.Beep(1200, 60)
+        sound.chime()
         return "done"

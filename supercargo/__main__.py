@@ -64,7 +64,7 @@ def capture_once(store: Store, args) -> bool:
     print_port(info)
     print(f"   ({time.time() - t0:.1f}s, портов в базе: {len(store.ports)})")
     print()
-    print(router.format_deals(router.find_deals(store.ports, args.tax), args.sort, args.top))
+    print(router.format_routes(router.find_routes(store.ports, args.sort), args.top))
     return True
 
 
@@ -100,14 +100,14 @@ def main():
     ap.add_argument("command", nargs="?", default="run", choices=["run", "console", "deals", "parse"])
     ap.add_argument("file", nargs="?")
     ap.add_argument("--key", default="F8", help="hotkey (F1..F12)")
-    ap.add_argument("--sort", default="margin", choices=list(router.SORT_KEYS))
+    ap.add_argument("--sort", default="trip", choices=list(router.SORT_KEYS))
     ap.add_argument("--top", type=int, default=10)
-    ap.add_argument("--tax", action="store_true", help="apply exchange tax to buy/sell prices")
     args = ap.parse_args()
-    sys.stdout.reconfigure(encoding="utf-8")
+    if sys.stdout is not None:  # None under pythonw (no console)
+        sys.stdout.reconfigure(encoding="utf-8")
 
     if args.command == "deals":
-        print(router.format_deals(router.find_deals(Store().ports, args.tax), args.sort, args.top))
+        print(router.format_routes(router.find_routes(Store().ports, args.sort), args.top))
     elif args.command == "parse":
         info, _, _ = tooltip.read_from_screenshot(Image.open(args.file))
         print_port(info)

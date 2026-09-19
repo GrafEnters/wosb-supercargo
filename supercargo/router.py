@@ -1,28 +1,28 @@
-"""Find profitable buy-here/sell-there deals from the stored market snapshot."""
+"""Plan trade trips from the stored market snapshot.
+
+Prices move as you trade: each bought batch raises the source price by the good's `step`,
+each sold batch lowers the destination price by the same share. A trip is filled batch by batch,
+always taking the next batch with the best profit per unit of weight, until the hold is full
+or nothing profitable is left.
+"""
+import json
 import math
 import statistics
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .tooltip import fix_decimal
 
+GOODS_PATH = Path(__file__).resolve().parent / "goods.json"
+HOLD = 40_000  # weight that fits in the hold at normal speed
+HOLD_OVERLOAD = 100_000  # max weight with overload; the ship sails 2x slower
+OVERLOAD_SLOWDOWN = 2.0
+MAX_BATCHES = 60  # per good per trip, a safety cap
 
-@dataclass
-class Deal:
-    good: str
-    src: str
-    dst: str
-    buy: float
-    sell: float
-    profit: float  # per unit
-    margin: float  # profit / buy
-    stock: float | None  # available at source
-    distance: float | None  # map grid cells between the ports (straight line)
-    age_min: float  # age of the older of the two quotes
 
-    @property
-    def per_distance(self) -> float | None:
-        return self.profit / self.distance if self.distance else None
+def load_goods(path: Path = GOODS_PATH) -> dict[str, dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
 def sanitize(ports: dict[str, dict]) -> dict[str, dict]:
@@ -53,76 +53,138 @@ def sanitize(ports: dict[str, dict]) -> dict[str, dict]:
     return ports
 
 
-def find_deals(ports: dict[str, dict], apply_tax: bool = False) -> list[Deal]:
-    ports = sanitize(ports)
-    now = time.time()
-    deals = []
-    for src, sp in ports.items():
-        for dst, dp in ports.items():
-            if src == dst:
-                continue
-            dist = None
-            if sp.get("map_xy") and dp.get("map_xy"):
-                dist = math.dist(sp["map_xy"], dp["map_xy"])
-            for good, sg in sp["goods"].items():
-                dg = dp["goods"].get(good)
-                if not dg or sg.get("buy") is None or dg.get("sell") is None:
-                    continue
-                buy, sell = sg["buy"], dg["sell"]
-                if apply_tax:
-                    buy *= 1 + (sp.get("tax") or 0) / 100
-                    sell *= 1 - (dp.get("tax") or 0) / 100
-                profit = sell - buy
-                if profit <= 0 or buy <= 0:
-                    continue
-                deals.append(Deal(
-                    good, src, dst, buy, sell, profit, profit / buy, sg.get("stock"), dist,
-                    (now - min(sp["updated"], dp["updated"])) / 60,
-                ))
-    return deals
+@dataclass
+class CargoItem:
+    good: str
+    units: int = 0
+    batches: int = 0
+    cost: float = 0.0
+    revenue: float = 0.0
+    weight: float = 0.0
+    first_buy: float = 0.0
+    last_buy: float = 0.0
+    first_sell: float = 0.0
+    last_sell: float = 0.0
+
+    @property
+    def profit(self) -> float:
+        return self.revenue - self.cost
 
 
-SORT_KEYS = {
-    "margin": lambda d: d.margin,
-    "profit": lambda d: d.profit,
-    "distance": lambda d: d.per_distance or 0,
-}
+@dataclass
+class Plan:
+    capacity: float
+    items: list[CargoItem] = field(default_factory=list)  # most profitable first
+
+    @property
+    def profit(self) -> float:
+        return sum(i.profit for i in self.items)
+
+    @property
+    def cost(self) -> float:
+        return sum(i.cost for i in self.items)
+
+    @property
+    def weight(self) -> float:
+        return sum(i.weight for i in self.items)
+
+
+def plan_trip(src: dict, dst: dict, goods: dict[str, dict], capacity: float) -> Plan:
+    """Best cargo for one trip src -> dst within `capacity` weight."""
+    batches = []  # (profit per weight, good, units, buy price, sell price)
+    for name, sq in src["goods"].items():
+        cfg = goods.get(name)
+        dq = dst["goods"].get(name)
+        if not cfg or not cfg.get("tradable", True) or not cfg.get("batch") or not dq:
+            continue
+        buy, sell = sq.get("buy"), dq.get("sell")
+        if not buy or not sell:
+            continue
+        size, weight, step = cfg["batch"], cfg["weight"], cfg.get("step", 0.05)
+        stock = sq.get("stock")
+        left = stock if stock else size * MAX_BATCHES
+        for k in range(MAX_BATCHES):
+            if left <= 0:
+                break
+            b, s = buy * (1 + step) ** k, sell * (1 - step) ** k
+            if s <= b:
+                break
+            units = min(size, left)
+            left -= units
+            batches.append(((s - b) / weight, name, units, b, s))
+    batches.sort(key=lambda x: x[0], reverse=True)
+
+    items: dict[str, CargoItem] = {}
+    room = capacity
+    for _, name, units, b, s in batches:
+        weight = goods[name]["weight"]
+        take = min(units, int(room // weight))
+        if take <= 0:
+            continue
+        it = items.setdefault(name, CargoItem(name, first_buy=b, first_sell=s))
+        it.units += take
+        it.batches += 1
+        it.cost += take * b
+        it.revenue += take * s
+        it.weight += take * weight
+        it.last_buy, it.last_sell = b, s
+        room -= take * weight
+    return Plan(capacity, sorted(items.values(), key=lambda i: i.profit, reverse=True))
 
 
 @dataclass
 class Route:
     src: str
     dst: str
-    distance: float | None
-    deals: list[Deal]  # best first
+    distance: float | None  # map grid cells, straight line
+    plan: Plan  # normal load
+    overload: Plan  # max load, 2x slower
 
     @property
-    def best(self) -> Deal:
-        return self.deals[0]
+    def per_cell(self) -> float:
+        return self.plan.profit / max(self.distance or 0, 0.5)
+
+    @property
+    def overload_better(self) -> bool:
+        """Is sailing overloaded more profitable per unit of time?"""
+        return self.overload.profit / OVERLOAD_SLOWDOWN > self.plan.profit * 1.02
 
 
-def find_routes(ports: dict[str, dict], sort: str = "margin", apply_tax: bool = False) -> list[Route]:
-    """Deals grouped by (src, dst) pair, pairs ordered by their best deal."""
-    key = SORT_KEYS[sort]
-    by_pair: dict[tuple[str, str], list[Deal]] = {}
-    for d in find_deals(ports, apply_tax):
-        by_pair.setdefault((d.src, d.dst), []).append(d)
-    routes = [
-        Route(src, dst, ds[0].distance, sorted(ds, key=key, reverse=True))
-        for (src, dst), ds in by_pair.items()
-    ]
-    return sorted(routes, key=lambda r: key(r.best), reverse=True)
+SORT_KEYS = {
+    "trip": lambda r: r.plan.profit,
+    "distance": lambda r: r.per_cell,
+}
 
 
-def format_deals(deals: list[Deal], sort: str = "margin", limit: int = 10) -> str:
-    if not deals:
-        return "Выгодных сделок пока нет - нужно снять цены хотя бы с двух портов."
-    deals = sorted(deals, key=SORT_KEYS[sort], reverse=True)[:limit]
-    out = [f"{'Товар':<13}{'Купить в':<22}{'Продать в':<22}{'Цена':>12}{'Прибыль/шт':>12}{'Маржа':>8}{'Дист.':>7}{'Возраст':>9}"]
-    for d in deals:
-        dist = f"{d.distance:.1f}" if d.distance else "?"
-        out.append(
-            f"{d.good[:12]:<13}{d.src[:21]:<22}{d.dst[:21]:<22}{f'{d.buy:g} -> {d.sell:g}':>12}"
-            f"{d.profit:>12.2f}{d.margin:>7.0%}{dist:>7}{d.age_min:>7.0f}м"
-        )
+def find_routes(ports: dict[str, dict], sort: str = "trip", goods: dict | None = None,
+                hold: float = HOLD, hold_overload: float = HOLD_OVERLOAD) -> list[Route]:
+    goods = goods or load_goods()
+    ports = sanitize(ports)
+    routes = []
+    for src, sp in ports.items():
+        for dst, dp in ports.items():
+            if src == dst:
+                continue
+            plan = plan_trip(sp, dp, goods, hold)
+            if plan.profit <= 0:
+                continue
+            dist = math.dist(sp["map_xy"], dp["map_xy"]) if sp.get("map_xy") and dp.get("map_xy") else None
+            routes.append(Route(src, dst, dist, plan, plan_trip(sp, dp, goods, hold_overload)))
+    return sorted(routes, key=SORT_KEYS[sort], reverse=True)
+
+
+def money(x: float) -> str:
+    return f"{x / 1000:.1f}k" if abs(x) >= 1000 else f"{x:.0f}"
+
+
+def format_routes(routes: list[Route], limit: int = 10) -> str:
+    if not routes:
+        return "Выгодных рейсов пока нет - нужно снять цены хотя бы с двух портов."
+    out = []
+    for r in routes[:limit]:
+        dist = f"{r.distance:.1f} кл." if r.distance else "?"
+        out.append(f"{r.src} -> {r.dst}  {dist}  прибыль {money(r.plan.profit)}, вложить {money(r.plan.cost)}")
+        for it in r.plan.items:
+            out.append(f"    {it.good:<12} {it.units:>7} шт ({it.batches} парт.)  "
+                       f"{it.first_buy:g}..{it.last_buy:.3g} -> {it.first_sell:g}..{it.last_sell:.3g}  +{money(it.profit)}")
     return "\n".join(out)

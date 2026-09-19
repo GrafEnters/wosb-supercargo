@@ -6,6 +6,7 @@ Modes:
   routes  - best routes drawn as arrows on the map, no scan markers;
   edit    - "Двигать порты": drag port markers to fix their positions (saved to ports_layout.json).
 """
+import json
 import math
 import queue
 import threading
@@ -25,7 +26,8 @@ DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"
 BACKGROUND = Path(__file__).resolve().parent / "background_map.png"
 
 ROUTE_COLORS = ["#d62828", "#1d4ed8", "#7b2cbf", "#2a9d3f", "#f77f00"]
-SORT_LABELS = {"margin": "Маржа %", "profit": "Прибыль/шт", "distance": "Прибыль/клетку пути"}
+SORT_LABELS = {"trip": "Прибыль за рейс", "distance": "Прибыль на клетку пути"}
+SETTINGS = Path(__file__).resolve().parent.parent / "data" / "settings.json"
 MARKER_R = 13
 VIEW_PX_PER_CELL = 100
 
@@ -46,7 +48,11 @@ class App(tk.Tk):
         self.view_tk_key = None
         self.routes: list[router.Route] = []
         self.selected: int | None = None
-        self.sort = tk.StringVar(value="margin")
+        self.sort = tk.StringVar(value="trip")
+        settings = self.load_settings()
+        self.hold = tk.IntVar(value=settings.get("hold", router.HOLD))
+        self.hold_overload = tk.IntVar(value=settings.get("hold_overload", router.HOLD_OVERLOAD))
+        self.list_rows: list[int | None] = []  # listbox row -> route index
         self.events: queue.Queue = queue.Queue()
 
         self._build_ui()
@@ -108,6 +114,16 @@ class App(tk.Tk):
             tk.Radiobutton(sort_row, text=label, value=k, variable=self.sort, command=self.build_routes,
                            bg="#262626", fg=fg, selectcolor="#3a3a3a", activebackground="#262626",
                            activeforeground=fg, font=font).pack(anchor="w", padx=(10, 0))
+
+        hold_row = tk.Frame(side, bg="#262626")
+        hold_row.pack(fill=tk.X, padx=12, pady=(6, 0))
+        for text, var in (("Трюм:", self.hold), ("с перегрузом:", self.hold_overload)):
+            tk.Label(hold_row, text=text, bg="#262626", fg=fg, font=font).pack(side=tk.LEFT)
+            entry = ttk.Spinbox(hold_row, from_=1000, to=1_000_000, increment=5000, width=8, textvariable=var,
+                                command=self.on_hold_change)
+            entry.pack(side=tk.LEFT, padx=(4, 12))
+            entry.bind("<Return>", lambda e: self.on_hold_change())
+            entry.bind("<FocusOut>", lambda e: self.on_hold_change())
 
         self.route_list = tk.Listbox(side, bg="#1b1b1b", fg=fg, font=("Consolas", 10), activestyle="none",
                                      selectbackground="#444", highlightthickness=0, borderwidth=0)
@@ -253,9 +269,9 @@ class App(tk.Tk):
         self.canvas.create_line(x0 + ux * pad + nx, y0 + uy * pad + ny, x1 - ux * pad + nx, y1 - uy * pad + ny,
                                 fill=color, width=6 if bold else 4, arrow=tk.LAST, arrowshape=(16, 20, 7),
                                 capstyle=tk.ROUND)
-        d = route.best
         dist = f" · {route.distance:.1f} кл." if route.distance else ""
-        self._label((x0 + x1) / 2 + nx * 3, (y0 + y1) / 2 + ny * 3, f"{d.good} +{d.margin:.0%}{dist}", "white", color)
+        self._label((x0 + x1) / 2 + nx * 3, (y0 + y1) / 2 + ny * 3,
+                    f"+{router.money(route.plan.profit)}{dist}", "white", color)
 
     def refresh_list(self):
         self.route_list.delete(0, tk.END)
@@ -263,20 +279,34 @@ class App(tk.Tk):
             self.route_list.insert(tk.END, "Маршрутов пока нет." if self.mode == "routes"
                                    else "Маршруты появятся, когда все порты будут отсканированы.")
             return
+        self.list_rows = []
+        money = router.money
+
+        def row(text, route_idx, fg="#b8b8b8"):
+            self.route_list.insert(tk.END, text)
+            self.route_list.itemconfig(tk.END, fg=fg)
+            self.list_rows.append(route_idx)
+
         for i, r in enumerate(self.routes[:30]):
             mark = "■" if i < len(ROUTE_COLORS) else " "
             dist = f"  {r.distance:.1f} кл." if r.distance else ""
-            self.route_list.insert(tk.END, f"{mark} {short(r.src)} -> {short(r.dst)}{dist}")
-            if i < len(ROUTE_COLORS):
-                self.route_list.itemconfig(tk.END, fg=ROUTE_COLORS[i])
-            for d in r.deals[:3]:
-                self.route_list.insert(tk.END, f"     {d.good:<12} {d.buy:g} -> {d.sell:g}  +{d.profit:.2f} ({d.margin:.0%})")
-                self.route_list.itemconfig(tk.END, fg="#b8b8b8")
+            row(f"{mark} {short(r.src)} -> {short(r.dst)}{dist}", i,
+                ROUTE_COLORS[i] if i < len(ROUTE_COLORS) else "#e8e8e8")
+            for it in r.plan.items:
+                row(f"   {it.good:<11}{it.units:>7,} шт {it.batches:>2} п.  +{money(it.profit)}".replace(",", " "), i)
+                row(f"      купить {it.first_buy:.3g}..{it.last_buy:.3g}  продать {it.first_sell:.3g}..{it.last_sell:.3g}",
+                    i, "#8a8a8a")
+            row(f"   прибыль +{money(r.plan.profit)}, вложить {money(r.plan.cost)}, груз {r.plan.weight:,.0f}"
+                .replace(",", " "), i, "#e8e8e8")
+            if r.overload_better:
+                row(f"   с перегрузом: +{money(r.overload.profit)} (плыть в 2 раза дольше)", i, "#d9a441")
+            row("", None)
 
     # ---------- actions ----------
     def build_routes(self):
         self.mode = "routes"
-        self.routes = router.find_routes(self.store.ports, self.sort.get())
+        self.routes = router.find_routes(self.store.ports, self.sort.get(), hold=self.hold.get(),
+                                         hold_overload=self.hold_overload.get())
         self.selected = None
         self.refresh_list()
         self.redraw()
@@ -351,15 +381,29 @@ class App(tk.Tk):
         sel = self.route_list.curselection()
         if not sel or not self.routes or self.mode != "routes":
             return
-        # Map a listbox row back to its route (each route occupies 1 + len(deals[:3]) rows).
-        row, idx = sel[0], 0
-        for i, r in enumerate(self.routes[:30]):
-            span = 1 + len(r.deals[:3])
-            if row < idx + span:
-                self.selected = None if self.selected == i else i
-                break
-            idx += span
-        self.redraw()
+        i = self.list_rows[sel[0]] if sel[0] < len(self.list_rows) else None
+        if i is not None:
+            self.selected = None if self.selected == i else i
+            self.redraw()
+
+    @staticmethod
+    def load_settings() -> dict:
+        try:
+            return json.loads(SETTINGS.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def on_hold_change(self):
+        try:
+            hold, over = int(self.hold.get()), int(self.hold_overload.get())
+        except (tk.TclError, ValueError):
+            return
+        if self.load_settings() == {"hold": hold, "hold_overload": over}:
+            return
+        SETTINGS.parent.mkdir(exist_ok=True)
+        SETTINGS.write_text(json.dumps({"hold": hold, "hold_overload": over}), encoding="utf-8")
+        if self.mode == "routes":
+            self.build_routes()
 
     def on_right_click(self, e):
         name = self._port_at(e.x, e.y)
@@ -398,4 +442,19 @@ class App(tk.Tk):
 
 
 def run():
-    App().mainloop()
+    import ctypes
+    import sys
+    # Started with pythonw (no console): keep prints and tracebacks in a log file.
+    if sys.stdout is None or sys.stderr is None:
+        log = open(Path(__file__).resolve().parent.parent / "data" / "supercargo.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = log
+    # One instance only: a second scanner would just double every scan.
+    ctypes.windll.kernel32.CreateMutexW(None, False, "supercargo-wosb-single-instance")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Суперкарго", "Суперкарго уже запущен.")
+        return
+    app = App()
+    app.report_callback_exception = lambda *exc: __import__("traceback").print_exception(*exc)
+    app.mainloop()
