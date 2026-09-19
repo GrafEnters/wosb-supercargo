@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import capture, router, tooltip
+from . import capture, mapgeo, router, tooltip
 from .store import Store
 
 DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"
@@ -47,7 +47,7 @@ def capture_once(store: Store, args) -> bool:
     img, _, cursor = capture.grab_game()
     DEBUG_DIR.mkdir(exist_ok=True)
     try:
-        info, crop = tooltip.read_from_screenshot(img, store.known_goods())
+        info, crop, _ = tooltip.read_from_screenshot(img, store.known_goods())
     except tooltip.TooltipNotFound as e:
         path = DEBUG_DIR / f"fail_{int(time.time())}.png"
         img.save(path)
@@ -59,7 +59,8 @@ def capture_once(store: Store, args) -> bool:
     if not info.goods:
         print_port(info)
         return False
-    store.update(info, map_pos=cursor)
+    geo = mapgeo.locate(img)
+    store.update(info, map_xy=geo.to_map(*cursor) if geo else None)
     print_port(info)
     print(f"   ({time.time() - t0:.1f}s, портов в базе: {len(store.ports)})")
     print()
@@ -108,7 +109,7 @@ def main():
     if args.command == "deals":
         print(router.format_deals(router.find_deals(Store().ports, args.tax), args.sort, args.top))
     elif args.command == "parse":
-        info, _ = tooltip.read_from_screenshot(Image.open(args.file))
+        info, _, _ = tooltip.read_from_screenshot(Image.open(args.file))
         print_port(info)
     elif args.command == "console":
         run_hotkey(args)

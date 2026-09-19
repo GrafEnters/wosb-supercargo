@@ -48,7 +48,8 @@ class Store:
         match = difflib.get_close_matches(name, list(self.ports), n=1, cutoff=0.85)
         return match[0] if match else name
 
-    def update(self, info: PortInfo, map_pos: tuple[int, int] | None = None) -> str:
+    def update(self, info: PortInfo, map_xy: tuple[float, float] | None = None) -> str:
+        """map_xy: port position on the flat map in grid cells (see mapgeo)."""
         info.name = self.resolve_name(info.name)
         prev = self.ports.get(info.name, {})
         goods = {
@@ -61,7 +62,7 @@ class Store:
             "tax": info.tax,
             "shallow": info.shallow,
             # The cursor sits on the port icon when the hotkey is pressed: free map coordinates.
-            "map_pos": list(map_pos) if map_pos else prev.get("map_pos"),
+            "map_xy": list(map_xy) if map_xy else prev.get("map_xy"),
             "goods": goods,
         }
         self.save()

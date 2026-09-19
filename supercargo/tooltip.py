@@ -11,7 +11,19 @@ from .ocr import Line, Word
 
 KNOWN_GOODS = [
     "Древесина", "Ром", "Ткань", "Зерно", "Смола", "Свежее мясо", "Вода", "Медь", "Уголь",
+    "Железо", "Животные",
 ]
+
+
+def fix_decimal(buy: float | None, sell: float | None) -> tuple[float | None, float | None, str | None]:
+    """OCR sometimes drops the decimal comma ('12,3' -> 123). Normally sell <= buy and buy < ~3x sell."""
+    if buy is None or sell is None:
+        return buy, sell, None
+    if sell > buy and sell / 10 <= buy:
+        return buy, sell / 10, f"sell {sell:g} -> {sell / 10:g} (lost decimal)"
+    if buy > 3.5 * sell and buy / 10 >= sell:
+        return buy / 10, sell, f"buy {buy:g} -> {buy / 10:g} (lost decimal)"
+    return buy, sell, None
 
 
 @dataclass
@@ -58,15 +70,21 @@ def _find_word(lines: list[Line], pattern: str) -> Word | None:
     return None
 
 
-def canonical_good(text: str, extra_names=()) -> str:
+def canonical_good(text: str, extra_names=()) -> str | None:
+    """Known good name for an OCR'd row label; None if it doesn't look like a good at all."""
     text = re.sub(r"^[^А-Яа-яЁё]+", "", text).strip()  # drop icon garbage before the name
     tokens = text.split()
     while len(tokens) > 1 and len(tokens[0]) <= 2:  # the item icon is sometimes read as a letter
         tokens.pop(0)
-    text = " ".join(tokens)
-    candidates = list(dict.fromkeys([*KNOWN_GOODS, *extra_names]))
-    match = difflib.get_close_matches(text.capitalize(), candidates, n=1, cutoff=0.7)
-    return match[0] if match else text.capitalize()
+    text = " ".join(tokens).capitalize()
+    match = difflib.get_close_matches(text, KNOWN_GOODS, n=1, cutoff=0.6)
+    if match:
+        return match[0]
+    # A good we don't know yet: accept only plausible words; learned names must match closely.
+    match = difflib.get_close_matches(text, list(extra_names), n=1, cutoff=0.8)
+    if match:
+        return match[0]
+    return text if re.fullmatch(r"[А-ЯЁ][а-яё]{2,}( [а-яё]{2,})?", text) else None
 
 
 def locate(img: Image.Image) -> tuple[int, int, int, int]:
@@ -143,7 +161,11 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
         vol_words = [w for w in ws if "(" in w.text or ")" in w.text]
         name_words = [w for w in ws if w not in vol_words]
         raw = " ".join(w.text for w in ws)
-        g = Good(canonical_good(" ".join(w.text for w in name_words), known_names), None, None, None, raw)
+        good_name = canonical_good(" ".join(w.text for w in name_words), known_names)
+        if good_name is None:
+            warnings.append(f"skipped row '{raw}'")
+            continue
+        g = Good(good_name, None, None, None, raw)
 
         def cell(x0, x1):
             box = (int(x0), int(cy - half), int(x1), int(cy + half))
@@ -166,6 +188,9 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
                 g.warnings.append(f"{attr}: unreadable '{t}'")
             elif score < 0.4:
                 g.warnings.append(f"{attr}: low confidence '{t}' ({score:.2f})")
+        g.buy, g.sell, fixed = fix_decimal(g.buy, g.sell)
+        if fixed:
+            g.warnings.append(fixed)
         if g.buy is not None and g.sell is not None and g.sell > g.buy:
             g.warnings.append(f"sell {g.sell} > buy {g.buy}, suspicious")
         goods.append(g)
@@ -175,7 +200,8 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
     return PortInfo(name, tax, shallow, goods, warnings)
 
 
-def read_from_screenshot(img: Image.Image, known_names=()) -> tuple[PortInfo, Image.Image]:
+def read_from_screenshot(img: Image.Image, known_names=()) -> tuple[PortInfo, Image.Image, tuple]:
+    """Returns (parsed info, tooltip crop, crop box in screenshot coords)."""
     box = locate(img)
     crop = img.crop(box)
-    return parse(crop, known_names), crop
+    return parse(crop, known_names), crop, box
