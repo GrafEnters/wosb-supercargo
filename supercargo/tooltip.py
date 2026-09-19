@@ -128,6 +128,7 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
         title_line = min(above, key=lambda l: l.y) if above else None
         warnings.append("title without [n/n] marker")
     name = re.sub(r"\s*\[.*$", "", title_line.text).strip() if title_line else "?"
+    name = name[:1].upper() + name[1:]
 
     tax = None
     tax_line = _find_line(lines, r"налог")

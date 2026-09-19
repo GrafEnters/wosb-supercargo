@@ -145,8 +145,17 @@ class App(tk.Tk):
         btns.pack(fill=tk.X, padx=12, pady=10)
         ttk.Button(btns, text="Обновить данные", command=self.refresh).pack(side=tk.LEFT)
         ttk.Button(btns, text="Построить сейчас", command=self.build_routes).pack(side=tk.LEFT, padx=6)
-        self.edit_btn = ttk.Button(btns, text="Двигать порты", command=self.toggle_edit)
+
+        # Admin tools, hidden behind a dim gear in the bottom corner (packed before the list so it stays visible).
+        bottom = tk.Frame(side, bg="#262626")
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 6))
+        gear = tk.Label(bottom, text="⚙", bg="#262626", fg="#3c3c3c", font=("Segoe UI", 9), cursor="hand2")
+        gear.pack(side=tk.RIGHT)
+        gear.bind("<Button-1>", lambda e: self.toggle_admin())
+        self.admin_frame = tk.Frame(bottom, bg="#262626")
+        self.edit_btn = ttk.Button(self.admin_frame, text="Двигать порты", command=self.toggle_edit)
         self.edit_btn.pack(side=tk.LEFT)
+        self.admin = False
 
         sort_row = tk.Frame(side, bg="#262626")
         sort_row.pack(fill=tk.X, padx=12)
@@ -331,6 +340,15 @@ class App(tk.Tk):
         self.selected = None
         self.refresh_list()
         self.redraw()
+
+    def toggle_admin(self):
+        self.admin = not self.admin
+        if self.admin:
+            self.admin_frame.pack(side=tk.LEFT)
+        else:
+            if self.mode == "edit":
+                self.toggle_edit()
+            self.admin_frame.pack_forget()
 
     def toggle_edit(self):
         if self.mode == "edit":
