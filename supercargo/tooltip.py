@@ -87,19 +87,28 @@ def canonical_good(text: str, extra_names=()) -> str | None:
     return text if re.fullmatch(r"[А-ЯЁ][а-яё]{2,}( [а-яё]{2,})?", text) else None
 
 
+def _table_header(lines: list[Line]) -> tuple[Word, Word] | None:
+    """The "Купить" / "Продать" column headers: the most reliable anchor of the tooltip
+    ("Торговый дом" often gets merged with its icon by OCR)."""
+    buy = _find_word(lines, r"купить")
+    sell = _find_word(lines, r"продать")
+    if buy is None or sell is None or not (0 < sell.x - buy.x < 20 * buy.h) or abs(sell.y - buy.y) > buy.h:
+        return None
+    return buy, sell
+
+
 def locate(img: Image.Image) -> tuple[int, int, int, int]:
     """Find the trade-house table on a full screenshot; return a crop box for the tooltip."""
-    lines = ocr.recognize(img)
-    anchor = _find_line(lines, r"торгов\w*\s+дом")
-    if anchor is None:
-        raise TooltipNotFound("'Торговый дом' not found on screen - is a port tooltip open?")
-    ax, ay = anchor.x, anchor.y
-    h = max(w.h for w in anchor.words)
-    # Tooltip is roughly 25 text-heights wide; header above the table ~15 lines, table below ~12.
-    left = max(0, int(ax - 3 * h))
-    right = min(img.width, int(ax + 28 * h))
-    top = max(0, int(ay - 22 * h))
-    bottom = min(img.height, int(ay + 20 * h))
+    header = _table_header(ocr.recognize(img))
+    if header is None:
+        raise TooltipNotFound("port tooltip not found on screen")
+    buy = header[0]
+    h = buy.h
+    # Tooltip spans ~14 text-heights left of "Купить" and ~17 right; header block above, up to ~12 goods below.
+    left = max(0, int(buy.x - 14 * h))
+    right = min(img.width, int(buy.x + 17 * h))
+    top = max(0, int(buy.y - 22 * h))
+    bottom = min(img.height, int(buy.y + 20 * h))
     return left, top, right, bottom
 
 
@@ -108,11 +117,11 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
     lines = ocr.recognize(img, scale=2.0)
     warnings: list[str] = []
 
-    anchor = _find_line(lines, r"торгов\w*\s+дом")
-    buy_hdr = _find_word(lines, r"купить")
-    sell_hdr = _find_word(lines, r"продать")
-    if anchor is None or buy_hdr is None or sell_hdr is None:
+    header = _table_header(lines)
+    if header is None:
         raise TooltipNotFound("trade table header not found")
+    buy_hdr, sell_hdr = header
+    header_y = buy_hdr.y
 
     lots = _find_line(lines, r"лотов")
     table_bottom = lots.y if lots else img.height
@@ -120,11 +129,11 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
     # Title: first line with "[n/n]" above the table, else the top-most line.
     title_line = None
     for ln in sorted(lines, key=lambda l: l.y):
-        if ln.y < anchor.y and re.search(r"\[\s*\d+\s*/\s*\d+\s*\]", ln.text):
+        if ln.y < header_y and re.search(r"\[\s*\d+\s*/\s*\d+\s*\]", ln.text):
             title_line = ln
             break
     if title_line is None:
-        above = [l for l in lines if l.y < anchor.y]
+        above = [l for l in lines if l.y < header_y]
         title_line = min(above, key=lambda l: l.y) if above else None
         warnings.append("title without [n/n] marker")
     name = re.sub(r"\s*\[.*$", "", title_line.text).strip() if title_line else "?"
@@ -141,16 +150,17 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
         m = re.search(r"мелководье\s+([IVXLl1\-–]+)", sh_line.text, re.I)
         shallow = m.group(1).replace("l", "I").replace("1", "I") if m else sh_line.text
 
-    # Item rows: lines between header and "Лотов", starting near the header's x, left of "Купить".
+    # Item rows: lines between the header and "Лотов", left of "Купить", starting at a common x.
     col_gap = sell_hdr.x - buy_hdr.x
-    rows = []
+    candidates = []
     for ln in lines:
         words = [w for w in ln.words if w.x < buy_hdr.x - 5]
-        if not words or ln is anchor:
-            continue
-        cy = min(w.y for w in words)
-        if anchor.y + anchor.words[0].h * 0.8 < cy < table_bottom - 3 and abs(words[0].x - anchor.x) < col_gap:
-            rows.append(words)
+        if words and header_y + buy_hdr.h * 0.8 < min(w.y for w in words) < table_bottom - 3:
+            candidates.append(words)
+    rows = []
+    if candidates:
+        left_x = statistics.median(ws[0].x for ws in candidates)
+        rows = [ws for ws in candidates if abs(ws[0].x - left_x) < col_gap / 2]
     rows.sort(key=lambda ws: ws[0].y)
 
     centers = [statistics.mean(w.y + w.h / 2 for w in ws) for ws in rows]

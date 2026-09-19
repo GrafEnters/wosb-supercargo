@@ -1,7 +1,7 @@
 """World of Sea Battle trade helper.
 
-  python -m supercargo              map window: hover a port on the in-game map, press F8 to scan it
-  python -m supercargo console      same, but text output in the console
+  python -m supercargo              map window: ports are scanned automatically while you hover them
+  python -m supercargo console      hotkey mode (F8), text output in the console
   python -m supercargo deals        print best deals from saved prices
   python -m supercargo parse FILE   parse a screenshot file (debug)
 """
@@ -115,7 +115,7 @@ def main():
         run_hotkey(args)
     else:
         from . import gui
-        gui.run(args.key)
+        gui.run()
 
 
 if __name__ == "__main__":

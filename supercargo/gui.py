@@ -1,34 +1,28 @@
-"""Map window: scan ports with the hotkey, see progress on the map, get routes drawn as arrows.
+"""Map window: ports are scanned automatically while you hover them on the in-game map;
+see progress on the map and get routes drawn as arrows.
 
 Modes:
   collect - after "Обновить данные": every known port is gray until rescanned, then gets a green check;
   routes  - best routes drawn as arrows on the map, no scan markers;
   edit    - "Двигать порты": drag port markers to fix their positions (saved to ports_layout.json).
 """
-import ctypes
-import ctypes.wintypes as wt
 import math
 import queue
 import threading
 import time
 import tkinter as tk
-import traceback
-import winsound
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import capture, mapgeo, router, tooltip
+from . import mapgeo, router
+from .autoscan import AutoScanner
 from .store import Store
 
 DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"
 # Clean top-down map (rectified from a screenshot with mapgeo), VIEW_PX_PER_CELL px per cell.
 BACKGROUND = Path(__file__).resolve().parent / "background_map.png"
-
-VK = {f"F{i}": 0x6F + i for i in range(1, 13)}
-MOD_NOREPEAT = 0x4000
-WM_HOTKEY = 0x0312
 
 ROUTE_COLORS = ["#d62828", "#1d4ed8", "#7b2cbf", "#2a9d3f", "#f77f00"]
 SORT_LABELS = {"margin": "Маржа %", "profit": "Прибыль/шт", "distance": "Прибыль/клетку пути"}
@@ -40,69 +34,18 @@ def short(port: str) -> str:
     return port.replace("Бухта ", "").replace("Порт ", "")
 
 
-class HotkeyWorker(threading.Thread):
-    """Owns the global hotkey; on press grabs the screen and parses the tooltip."""
-
-    def __init__(self, key: str, out: queue.Queue, known_goods):
-        super().__init__(daemon=True)
-        self.key, self.out, self.known_goods = key, out, known_goods
-
-    def run(self):
-        user32 = ctypes.windll.user32
-        if not user32.RegisterHotKey(None, 1, MOD_NOREPEAT, VK[self.key]):
-            self.out.put(("fatal", f"Клавиша {self.key} занята другой программой"))
-            return
-        msg = wt.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == WM_HOTKEY:
-                self.scan()
-
-    def scan(self):
-        try:
-            img, _, cursor = capture.grab_game()
-        except Exception as e:
-            self.out.put(("error", str(e), None))
-            winsound.Beep(400, 150)
-            return
-        self.process(img, cursor)
-
-    def process(self, img: Image.Image, cursor: tuple[int, int]):
-        geo = None
-        try:
-            geo = mapgeo.locate(img)
-            info, crop, _ = tooltip.read_from_screenshot(img, self.known_goods())
-            DEBUG_DIR.mkdir(exist_ok=True)
-            crop.save(DEBUG_DIR / "last_tooltip.png")
-            if not info.goods:
-                raise tooltip.TooltipNotFound("в подсказке не найдено товаров")
-            if geo is None:
-                raise tooltip.TooltipNotFound("карта не распознана - открой карту мира")
-        except Exception as e:
-            if not isinstance(e, tooltip.TooltipNotFound):
-                traceback.print_exc()
-            DEBUG_DIR.mkdir(exist_ok=True)
-            img.save(DEBUG_DIR / f"fail_{int(time.time())}.png")
-            self.out.put(("error", str(e), geo.to_map(*cursor) if geo else None))
-            winsound.Beep(400, 150)
-            return
-        self.out.put(("scan", info, geo.to_map(*cursor)))
-        winsound.Beep(1200, 100)
-
-
 class App(tk.Tk):
-    def __init__(self, key: str = "F8"):
+    def __init__(self):
         super().__init__()
         self.title("Суперкарго - World of Sea Battle")
         self.geometry("1500x900")
         self.configure(bg="#1e1e1e")
         self.store = Store()
-        self.key = key
         self.view = Image.open(BACKGROUND).convert("RGB")  # top-down background map
         self.view_tk = None
         self.view_tk_key = None
         self.routes: list[router.Route] = []
         self.selected: int | None = None
-        self.flash: tuple[tuple[int, int], float] | None = None  # failed-scan screen position and time
         self.sort = tk.StringVar(value="margin")
         self.events: queue.Queue = queue.Queue()
 
@@ -113,7 +56,8 @@ class App(tk.Tk):
             self.mode = "collect"
             self.refresh_list()
             self.redraw()
-        HotkeyWorker(key, self.events, self.store.known_goods).start()
+        AutoScanner(self.events, self.store.known_goods,
+                    lambda name: self.store.position(self.store.resolve_name(name)) is None).start()
         self.after(50, self.poll)
 
     # ---------- UI ----------
@@ -185,16 +129,16 @@ class App(tk.Tk):
         elif self.mode == "collect":
             self.status.config(text=f"Сбор данных: {done} / {len(names)} портов")
             if not names:
-                hint = f"Открой карту в игре, наведи курсор на порт и нажми {self.key}. Каждый новый порт добавится на карту."
+                hint = "Открой карту в игре и задержи курсор на порту, пока не появится подсказка. Каждый новый порт добавится на карту."
             else:
-                hint = (f"Наведи курсор на серые порты и нажми {self.key}. Когда все станут зелёными, "
+                hint = (f"Открой карту в игре и по очереди задерживай курсор на серых портах. Когда все станут зелёными, "
                         f"маршрут построится сам. Новые порты добавляются автоматически. "
                         f"ПКМ по порту - забыть его.")
         else:
             oldest = min((p["updated"] for p in self.store.ports.values()), default=time.time())
             age = max(0.0, time.time() - oldest) / 60
             self.status.config(text=f"Маршруты по {len(names)} портам")
-            hint = (f"Самым старым ценам {age:.0f} мин. {self.key} над портом обновит его цены, "
+            hint = (f"Самым старым ценам {age:.0f} мин. Наведи курсор на порт на карте - его цены обновятся, "
                     f"«Обновить данные» - пересканировать все порты. Клик по маршруту в списке - показать только его.")
         self.hint.config(text=hint)
 
@@ -255,10 +199,6 @@ class App(tk.Tk):
         else:
             self.draw_routes()
 
-        if self.flash and time.time() - self.flash[1] < 2.5:
-            x, y = self.to_canvas(self.cell_to_view(self.flash[0]))
-            c.create_oval(x - 18, y - 18, x + 18, y + 18, outline="#ff3030", width=3)
-            c.create_text(x, y - 28, text="не распознано", fill="#ff5050", font=("Segoe UI", 10, "bold"))
         self.update_status()
 
     def draw_scan_marker(self, name, xy, scanned):
@@ -439,19 +379,10 @@ class App(tk.Tk):
             while True:
                 ev = self.events.get_nowait()
                 kind = ev[0]
-                if kind == "fatal":
-                    messagebox.showerror("Суперкарго", ev[1])
-                elif kind == "error":
-                    _, msg, map_xy = ev
-                    print("scan failed:", msg)
-                    if map_xy:
-                        self.flash = (map_xy, time.time())
-                        self.after(2600, self.redraw)
-                    self.redraw()
-                elif kind == "scan":
+                if kind == "scan":
                     _, info, map_xy = ev
                     name = self.store.update(info, map_xy=map_xy)
-                    print(f"scanned: {name} ({len(info.goods)} goods) at {mapgeo.cell_name(*map_xy)}")
+                    print(f"scanned: {name} ({len(info.goods)} goods)")
                     if self.mode == "edit":
                         self.redraw()
                     elif self.mode == "routes":
@@ -466,5 +397,5 @@ class App(tk.Tk):
         self.after(50, self.poll)
 
 
-def run(key: str = "F8"):
-    App(key.upper()).mainloop()
+def run():
+    App().mainloop()
