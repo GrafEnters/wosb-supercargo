@@ -14,19 +14,17 @@ import time
 import tkinter as tk
 import traceback
 import winsound
-from collections import deque
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-import numpy as np
 from PIL import Image, ImageTk
 
 from . import capture, mapgeo, router, tooltip
 from .store import Store
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"
-BACKGROUND = DATA_DIR / "background_map.png"  # top-down map, VIEW_PX_PER_CELL px per cell
+# Clean top-down map (rectified from a screenshot with mapgeo), VIEW_PX_PER_CELL px per cell.
+BACKGROUND = Path(__file__).resolve().parent / "background_map.png"
 
 VK = {f"F{i}": 0x6F + i for i in range(1, 13)}
 MOD_NOREPEAT = 0x4000
@@ -72,7 +70,7 @@ class HotkeyWorker(threading.Thread):
         geo = None
         try:
             geo = mapgeo.locate(img)
-            info, crop, box = tooltip.read_from_screenshot(img, self.known_goods())
+            info, crop, _ = tooltip.read_from_screenshot(img, self.known_goods())
             DEBUG_DIR.mkdir(exist_ok=True)
             crop.save(DEBUG_DIR / "last_tooltip.png")
             if not info.goods:
@@ -87,14 +85,7 @@ class HotkeyWorker(threading.Thread):
             self.out.put(("error", str(e), geo.to_map(*cursor) if geo else None))
             winsound.Beep(400, 150)
             return
-        # Top-down frame for the background, with the tooltip area marked invalid.
-        frame = geo.rectify(img, VIEW_PX_PER_CELL)
-        mask = Image.new("L", img.size, 255)
-        l, t, r, b = box
-        pad = 30  # the estimated box can be a bit smaller than the real tooltip
-        mask.paste(0, (max(0, l - pad), max(0, t - pad), min(img.width, r + pad), min(img.height, b + pad)))
-        mask = geo.rectify(mask, VIEW_PX_PER_CELL)
-        self.out.put(("scan", info, geo.to_map(*cursor), frame, mask))
+        self.out.put(("scan", info, geo.to_map(*cursor)))
         winsound.Beep(1200, 100)
 
 
@@ -106,12 +97,9 @@ class App(tk.Tk):
         self.configure(bg="#1e1e1e")
         self.store = Store()
         self.key = key
-        self.frames: deque[tuple[np.ndarray, np.ndarray]] = deque(maxlen=10)  # (rgb, valid mask)
-        self.view: Image.Image | None = None  # top-down background map
+        self.view = Image.open(BACKGROUND).convert("RGB")  # top-down background map
         self.view_tk = None
         self.view_tk_key = None
-        if BACKGROUND.exists():
-            self.set_background(Image.open(BACKGROUND).convert("RGB"), save=False)
         self.routes: list[router.Route] = []
         self.selected: int | None = None
         self.flash: tuple[tuple[int, int], float] | None = None  # failed-scan screen position and time
@@ -202,13 +190,6 @@ class App(tk.Tk):
         self.hint.config(text=hint)
 
     # ---------- geometry ----------
-    def set_background(self, view: Image.Image, save: bool = True):
-        self.view = view
-        self.view_tk_key = None
-        if save:
-            DATA_DIR.mkdir(exist_ok=True)
-            view.save(BACKGROUND)
-
     def view_xy(self, name: str):
         """Port position in background-view pixels."""
         xy = self.store.position(name)
@@ -248,15 +229,11 @@ class App(tk.Tk):
         c = self.canvas
         c.delete("all")
         s, ox, oy = self._transform()
-        if self.view:
-            size = (max(1, int(self.view.width * s)), max(1, int(self.view.height * s)))
-            if self.view_tk_key != size:
-                self.view_tk = ImageTk.PhotoImage(self.view.resize(size, Image.LANCZOS))
-                self.view_tk_key = size
-            c.create_image(ox, oy, image=self.view_tk, anchor="nw")
-        else:
-            c.create_text(c.winfo_width() / 2, c.winfo_height() / 2, fill="#888", font=("Segoe UI", 14),
-                          text=f"Фон карты появится после первого скана ({self.key} над портом)")
+        size = (max(1, int(self.view.width * s)), max(1, int(self.view.height * s)))
+        if self.view_tk_key != size:
+            self.view_tk = ImageTk.PhotoImage(self.view.resize(size, Image.LANCZOS))
+            self.view_tk_key = size
+        c.create_image(ox, oy, image=self.view_tk, anchor="nw")
 
         if self.mode in ("collect", "edit"):
             for name in self.store.all_names():
@@ -432,17 +409,6 @@ class App(tk.Tk):
             self.store.remove(name)
             self.build_routes() if self.mode == "routes" else self.redraw()
 
-    def add_frame(self, frame: Image.Image, mask: Image.Image):
-        """Background = per-pixel median over recent top-down frames, skipping each frame's tooltip area."""
-        self.frames.append((np.asarray(frame.convert("RGB")), np.asarray(mask) > 128))
-        rgbs = [f for f, _ in self.frames]
-        masks = [m for _, m in self.frames]
-        if self.view is not None and self.view.size == frame.size:
-            prev = np.asarray(self.view.convert("RGB"))
-            rgbs.append(prev)
-            masks.append(prev.max(axis=2) > 0)
-        self.set_background(Image.fromarray(masked_median(np.stack(rgbs), np.stack(masks))))
-
     def bring_to_front(self):
         self.deiconify()
         self.lift()
@@ -465,10 +431,9 @@ class App(tk.Tk):
                         self.after(2600, self.redraw)
                     self.redraw()
                 elif kind == "scan":
-                    _, info, map_xy, frame, mask = ev
+                    _, info, map_xy = ev
                     name = self.store.update(info, map_xy=map_xy)
                     print(f"scanned: {name} ({len(info.goods)} goods) at {mapgeo.cell_name(*map_xy)}")
-                    self.add_frame(frame, mask)
                     if self.mode == "edit":
                         self.redraw()
                     elif self.mode == "routes":
@@ -481,18 +446,6 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(50, self.poll)
-
-
-def masked_median(rgbs: np.ndarray, valid: np.ndarray) -> np.ndarray:
-    """Per-pixel median over frames (N,H,W,3) using only frames where valid (N,H,W) is set."""
-    data = np.where(valid[..., None], rgbs.astype(np.float32), np.inf)
-    data.sort(axis=0)
-    count = valid.sum(axis=0)
-    # Upper median: with an even count prefer the brighter value (tooltips are dark, the map is light).
-    idx = np.clip(np.minimum(count // 2, count - 1), 0, None)[None, ..., None]
-    med = np.take_along_axis(data, np.broadcast_to(idx, (1, *data.shape[1:])), axis=0)[0]
-    med[count == 0] = 0
-    return med.astype(np.uint8)
 
 
 def run(key: str = "F8"):
