@@ -57,6 +57,31 @@ SORT_KEYS = {
 }
 
 
+@dataclass
+class Route:
+    src: str
+    dst: str
+    distance: float | None
+    deals: list[Deal]  # best first
+
+    @property
+    def best(self) -> Deal:
+        return self.deals[0]
+
+
+def find_routes(ports: dict[str, dict], sort: str = "margin", apply_tax: bool = False) -> list[Route]:
+    """Deals grouped by (src, dst) pair, pairs ordered by their best deal."""
+    key = SORT_KEYS[sort]
+    by_pair: dict[tuple[str, str], list[Deal]] = {}
+    for d in find_deals(ports, apply_tax):
+        by_pair.setdefault((d.src, d.dst), []).append(d)
+    routes = [
+        Route(src, dst, ds[0].distance, sorted(ds, key=key, reverse=True))
+        for (src, dst), ds in by_pair.items()
+    ]
+    return sorted(routes, key=lambda r: key(r.best), reverse=True)
+
+
 def format_deals(deals: list[Deal], sort: str = "margin", limit: int = 10) -> str:
     if not deals:
         return "Выгодных сделок пока нет - нужно снять цены хотя бы с двух портов."

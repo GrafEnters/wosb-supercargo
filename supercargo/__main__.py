@@ -1,6 +1,7 @@
 """World of Sea Battle trade helper.
 
-  python -m supercargo              hover a port on the map, press F8 to capture its prices
+  python -m supercargo              map window: hover a port on the in-game map, press F8 to scan it
+  python -m supercargo console      same, but text output in the console
   python -m supercargo deals        print best deals from saved prices
   python -m supercargo parse FILE   parse a screenshot file (debug)
 """
@@ -95,7 +96,7 @@ def run_hotkey(args):
 
 def main():
     ap = argparse.ArgumentParser(prog="supercargo")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "deals", "parse"])
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "console", "deals", "parse"])
     ap.add_argument("file", nargs="?")
     ap.add_argument("--key", default="F8", help="hotkey (F1..F12)")
     ap.add_argument("--sort", default="margin", choices=list(router.SORT_KEYS))
@@ -109,8 +110,11 @@ def main():
     elif args.command == "parse":
         info, _ = tooltip.read_from_screenshot(Image.open(args.file))
         print_port(info)
-    else:
+    elif args.command == "console":
         run_hotkey(args)
+    else:
+        from . import gui
+        gui.run(args.key)
 
 
 if __name__ == "__main__":
