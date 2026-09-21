@@ -231,7 +231,8 @@ class App(tk.Tk):
 
         # admin tools behind a dim gear in the corner
         foot = tk.Frame(side, bg=WOOD)
-        foot.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 8))
+        # before=page, otherwise the page (fill=BOTH, expand) eats the whole cavity and the footer gets no height
+        foot.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 8), before=page)
         gear = tk.Label(foot, text="⚙", bg=WOOD, fg=WOOD_LIGHT, font=("Segoe UI Symbol", 10), cursor="hand2")
         gear.pack(side=tk.RIGHT)
         gear.bind("<Button-1>", lambda e: self.toggle_admin())
@@ -250,6 +251,7 @@ class App(tk.Tk):
             Chip(self.zone_panel, navigation.roman(r), str(r), self.zone_rank, lambda: None).pack(side=tk.LEFT, padx=(0, 3))
         self.admin = False
 
+        self.bind("<Control-Shift-A>", lambda e: self.toggle_admin())  # same as the gear in the corner
         self.bind("<Return>", lambda e: self.close_zone())
         self.bind("<Escape>", lambda e: self.cancel_draft())
         self.bind("<BackSpace>", lambda e: self.undo_point())
