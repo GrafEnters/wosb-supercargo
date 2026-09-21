@@ -397,11 +397,15 @@ class App(tk.Tk):
         ux, uy = (x1 - x0) / length, (y1 - y0) / length
         nx, ny = -uy * 5, ux * 5  # shift sideways so A->B and B->A don't overlap
         pad = MARKER_R + 2
-        pts = (x0 + ux * pad + nx, y0 + uy * pad + ny, x1 - ux * pad + nx, y1 - uy * pad + ny)
-        w = 4 if bold else 3
-        self.canvas.create_line(*pts, fill=PAPER_HALO, width=w + 4, capstyle=tk.ROUND)
-        self.canvas.create_line(*pts, fill=color, width=w, arrow=tk.LAST, arrowshape=(14, 18, 6), capstyle=tk.ROUND,
-                                dash=() if bold else (14, 6))
+        ax, ay = x0 + ux * pad + nx, y0 + uy * pad + ny
+        bx, by = x1 - ux * pad + nx, y1 - uy * pad + ny
+        w, halo = (4 if bold else 3), 2
+        # the halo is the same line, thicker and with a bigger arrowhead pushed a little past the tip
+        self.canvas.create_line(ax - ux * halo, ay - uy * halo, bx + ux * halo, by + uy * halo,
+                                fill=PAPER_HALO, width=w + 2 * halo, arrow=tk.LAST,
+                                arrowshape=(14 + halo, 18 + halo, 6), capstyle=tk.ROUND)
+        self.canvas.create_line(ax, ay, bx, by, fill=color, width=w, arrow=tk.LAST, arrowshape=(14, 18, 6),
+                                capstyle=tk.ROUND, dash=() if bold else (14, 6))
         dist = f" · {route.distance:.1f} кл." if route.distance else ""
         self._label((x0 + x1) / 2 + nx * 3, (y0 + y1) / 2 + ny * 3, f"+{router.money(route.plan.profit)}{dist}",
                     fg=INK, stripe=color, anchor="center")
