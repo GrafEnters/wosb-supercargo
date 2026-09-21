@@ -25,14 +25,15 @@ from .store import Store
 from .theme import (AMBER, BRASS, BRASS_DARK, BRASS_LIGHT, F_HEAD, F_MAP, F_MAP_SMALL, F_NUM, F_NUM_SMALL,
                     F_SMALL, F_SMALL_ITALIC, F_SUBTITLE, F_SYMBOL, F_TITLE, F_UI, F_UI_BOLD, INK, INK_FAINT,
                     INK_SOFT, PAPER, PAPER_DIM, PAPER_HALO, PAPER_LINE, ROUTE_COLORS, SEA, SEA_LIGHT, WAX, WOOD,
-                    WOOD_LIGHT, Button, Chip, Divider, Field, ThinScrollbar, mix, wood_texture)
+                    WOOD_LIGHT, Button, Check, Chip, Divider, Field, ThinScrollbar, mix, wood_texture)
 
 HERE = Path(__file__).resolve().parent
 BACKGROUND = HERE / "background_map.png"  # clean top-down map, VIEW_PX_PER_CELL px per cell
 ICON = HERE / "icon.ico"
 SETTINGS = HERE.parent / "data" / "settings.json"
 
-SORT_LABELS = {"trip": "за рейс", "distance": "на клетку пути"}
+SORT_LABELS = {"distance": "на клетку пути", "trip": "за рейс"}
+LEG_LABELS = {"1": "1 переход", "2": "2 перехода"}
 MARKER_R = 12
 VIEW_PX_PER_CELL = 100
 MAP_MARGIN = 26  # wood showing around the map
@@ -99,14 +100,17 @@ class App(tk.Tk):
         self.hover_route: int | None = None
         self.reveal: int | None = None  # how many course lines are drawn during the reveal animation
         self.tip_port: str | None = None
-        self.sort = tk.StringVar(value="trip")
+        self.sort = tk.StringVar(value="distance")
         settings = self.load_settings()
         self.hold = tk.IntVar(value=settings.get("hold", router.HOLD))
         self.hold_overload = tk.IntVar(value=settings.get("hold_overload", router.HOLD_OVERLOAD))
-        self.zones = navigation.load_zones()
+        self.rules = navigation.load_rules()
+        self.zones = self.rules.zones
+        self.peace = tk.BooleanVar(value=settings.get("peace", False))
         self.ship_rank = tk.StringVar(value=str(settings.get("ship_rank", 4)))
         self.ship_xy = tuple(settings["ship_xy"]) if settings.get("ship_xy") else None
         self.zone_rank = tk.StringVar(value=str(settings.get("zone_rank", 6)))
+        self.legs = tk.StringVar(value=str(settings.get("legs", 2)))
         self.placing_ship = False
         self.draft: list[tuple[float, float]] = []  # zone being drawn
         self.cursor_cell: tuple[float, float] | None = None
@@ -197,12 +201,18 @@ class App(tk.Tk):
         self.ship_btn.pack(side=tk.LEFT)
         self.ship_label = tk.Label(pos_row, bg=PAPER, fg=INK_SOFT, font=F_SMALL, anchor="w")
         self.ship_label.pack(side=tk.LEFT, padx=(8, 0))
+        Check(page, "мирный флаг", self.peace, self.on_peace_change).pack(fill=tk.X, padx=16, pady=(6, 0))
 
         sort_row = tk.Frame(page, bg=PAPER)
         sort_row.pack(fill=tk.X, padx=16, pady=(8, 0))
         tk.Label(sort_row, text="Выгода", bg=PAPER, fg=INK_SOFT, font=F_SMALL).pack(side=tk.LEFT, padx=(0, 6))
         for k, label in SORT_LABELS.items():
-            Chip(sort_row, label, k, self.sort, lambda: self.build_routes(animate=False)).pack(side=tk.LEFT, padx=(0, 4))
+            Chip(sort_row, label, k, self.sort, self.on_plan_change).pack(side=tk.LEFT, padx=(0, 4))
+        legs_row = tk.Frame(page, bg=PAPER)
+        legs_row.pack(fill=tk.X, padx=16, pady=(6, 0))
+        tk.Label(legs_row, text="Рейс", bg=PAPER, fg=INK_SOFT, font=F_SMALL).pack(side=tk.LEFT, padx=(0, 6))
+        for k, label in LEG_LABELS.items():
+            Chip(legs_row, label, k, self.legs, self.on_plan_change).pack(side=tk.LEFT, padx=(0, 4))
 
         Divider(page).pack(fill=tk.X, padx=16, pady=(8, 0))
         tk.Label(page, text="МАНИФЕСТ", bg=PAPER, fg=INK_FAINT, font=F_SMALL, anchor="w").pack(fill=tk.X, padx=16)
@@ -220,6 +230,7 @@ class App(tk.Tk):
         t = self.text
         t.tag_config("head", font=F_UI_BOLD, spacing1=9)
         t.tag_config("sum", font=F_SMALL, foreground=INK_SOFT, lmargin1=16, lmargin2=16)
+        t.tag_config("leg", font=F_UI_BOLD, foreground=INK_SOFT, lmargin1=8, lmargin2=8, spacing1=4)
         t.tag_config("num", font=F_NUM, foreground=INK, lmargin1=16, lmargin2=16)
         t.tag_config("dim", font=F_NUM_SMALL, foreground=INK_FAINT, lmargin1=16, lmargin2=16)
         t.tag_config("warn", font=F_SMALL_ITALIC, foreground=AMBER, lmargin1=16, lmargin2=16)
@@ -254,6 +265,7 @@ class App(tk.Tk):
         tk.Label(chips, text="Ранг зоны", bg=WOOD, fg=INK_FAINT, font=F_SMALL).pack(side=tk.LEFT, padx=(0, 6))
         for r in range(2, navigation.MAX_RANK + 1):
             Chip(chips, navigation.roman(r), str(r), self.zone_rank, lambda: None).pack(side=tk.LEFT, padx=(0, 3))
+        Chip(chips, "⚑ мирный", navigation.PEACE, self.zone_rank, lambda: None).pack(side=tk.LEFT, padx=(6, 0))
         Button(self.zone_panel, "Ранги по портам", self.ranks_from_ports).pack(anchor="w", pady=(5, 0))
         self.admin = False
 
@@ -274,12 +286,14 @@ class App(tk.Tk):
         pos = {n: tuple(self.store.position(n)) for n in self.store.all_names() if self.store.position(n)}
         ranks = {n: navigation.min_rank(p.get("shallow")) for n, p in self.store.ports.items()}
         sig = (tuple(sorted(pos.items())), tuple(sorted((k, v) for k, v in ranks.items() if v)), self.rank,
-               tuple((z.rank, len(z.points)) for z in self.zones))
+               tuple((z.rank, z.kind, len(z.points)) for z in self.zones),
+               bool(self.peace.get()), tuple(sorted(self.rules.peace_ports)))
         if not force and self.nav is not None and sig == self._nav_sig:
             self.nav.set_ship(self.ship_xy)
             return
         self._nav_sig = sig
-        self.nav = navigation.Navigator(self.zones, self.rank, pos, ranks)
+        self.nav = navigation.Navigator(self.zones, self.rank, pos, ranks, peace=bool(self.peace.get()),
+                                        peace_ports=self.rules.peace_ports)
         self.nav.set_ship(self.ship_xy)
 
     def all_scanned(self) -> bool:
@@ -292,13 +306,16 @@ class App(tk.Tk):
         self.progress.pack_forget()
         if self.mode == "shallows":
             self.heading.config(text="Мелководье")
-            blocked = sum(1 for z in self.zones if z.rank > self.rank)
+            peace_zones = sum(1 for z in self.zones if z.kind == navigation.PEACE)
+            blocked = sum(1 for z in self.zones if z.kind == navigation.SHALLOW and z.rank > self.rank)
             self.sub.config(text=f"{len(self.zones)} {plural(len(self.zones), 'зона', 'зоны', 'зон')} · "
-                                 f"{blocked} не по зубам рангу {navigation.roman(self.rank)}")
+                                 f"{blocked} не по зубам рангу {navigation.roman(self.rank)} · "
+                                 f"мирных: {peace_zones}, портов под мирным флагом: {len(self.rules.peace_ports)}")
             hint = ("Клик ставит вершину, клик по первой вершине или Enter замыкает зону. Backspace убирает "
                     "точку, Esc бросает начатое, правый клик по зоне стирает её. Ранг внизу: VI значит "
-                    "«пройдут ранги VI–VII». Shift+клик ставит выбранный ранг готовой зоне, "
-                    "«Ранги по портам» проставит их сам по подсказкам портов.")
+                    "«пройдут ранги VI–VII», «⚑ мирный» — зона, закрытая мирному флагу. Shift+клик ставит "
+                    "ранг готовой зоне, Ctrl+клик по порту закрывает его для мирного флага, "
+                    "«Ранги по портам» проставит ранги сам.")
         elif self.mode == "edit":
             self.heading.config(text="Поправка карты")
             self.sub.config(text=f"{len(names)} {plural(len(names), 'порт', 'порта', 'портов')} в журнале")
@@ -425,10 +442,10 @@ class App(tk.Tk):
         self.draw_ship()
         self.update_status()
 
-    def _label(self, x, y, text, fg=INK, bg=PAPER, font=F_MAP, tags=(), stripe=None, anchor="n"):
+    def _label(self, x, y, text, fg=INK, bg=PAPER, font=F_MAP, tags=(), stripe=None, anchor="n", pad=None):
         t = self.canvas.create_text(x, y, text=text, fill=fg, font=font, tags=tags, anchor=anchor)
         x0, y0, x1, y1 = self.canvas.bbox(t)
-        pad = 4 if stripe else 3
+        pad = pad if pad is not None else (4 if stripe else 3)
         rect = self.canvas.create_rectangle(x0 - pad, y0 - 1, x1 + pad, y1 + 1, fill=bg, outline=PAPER_LINE, tags=tags)
         self.canvas.tag_lower(rect, t)
         if stripe:
@@ -439,13 +456,14 @@ class App(tk.Tk):
             pts = [c for p in z.points for c in self.to_canvas(self.cell_to_view(p))]
             if len(pts) < 6:
                 continue
-            blocked = z.rank > self.rank
-            color = WAX if blocked else SEA
+            blocked = z.blocks(self.rank, bool(self.peace.get()))
+            peace_zone = z.kind == navigation.PEACE
+            color = WAX if blocked else (INK_FAINT if peace_zone else SEA)
             self.canvas.create_polygon(pts, fill=color, stipple="gray25" if blocked else "gray12",
                                        outline=color, width=1, dash=(5, 4))
             cx, cy = self.to_canvas(self.cell_to_view(z.centroid()))
-            text = navigation.zone_label(z.rank)
-            if self.mode == "shallows":
+            text = z.label()
+            if self.mode == "shallows" and z.kind == navigation.SHALLOW:
                 hint = navigation.suggest_rank(z, self.port_ranks_by_xy())
                 if hint and hint != z.rank:
                     text += f"  порты: {navigation.roman(hint)}"
@@ -483,6 +501,8 @@ class App(tk.Tk):
         c, (x, y), r, tags = self.canvas, xy, MARKER_R, ("port", self.port_tag(name))
         if self.nav and not self.nav.reachable(name):  # too shallow for this ship
             c.create_oval(x - r - 4, y - r - 4, x + r + 4, y + r + 4, outline=WAX, width=1, dash=(3, 3), tags=tags)
+        if name in self.rules.peace_ports:  # no entry under the peace flag
+            self.draw_flag(x + r - 2, y - r, tags)
         if scanned:
             c.create_oval(x - r - 1, y - r - 1, x + r + 1, y + r + 1, fill=BRASS_DARK, outline="", tags=tags)
             c.create_oval(x - r, y - r, x + r, y + r, fill=SEA, outline=BRASS_LIGHT, width=2, tags=tags)
@@ -494,8 +514,15 @@ class App(tk.Tk):
             c.create_text(x, y, text="?", fill=INK_SOFT, font=(F_MAP[0], 11, "bold"), tags=tags)
             self._label(x, y + r + 5, short(name), fg=INK_SOFT, bg=PAPER_DIM, font=F_MAP_SMALL, tags=tags)
 
+    def draw_flag(self, x, y, tags=()):
+        c = self.canvas
+        c.create_line(x, y - 9, x, y + 5, fill=INK, width=2, tags=tags)
+        c.create_polygon(x + 1, y - 9, x + 11, y - 5.5, x + 1, y - 2, fill=PAPER, outline=INK, tags=tags)
+
     def draw_edit_marker(self, name, xy):
         c, (x, y), r, tags = self.canvas, xy, 8, ("port", self.port_tag(name))
+        if name in self.rules.peace_ports:
+            self.draw_flag(x + r, y - r + 2, tags)
         c.create_line(x - r - 6, y, x + r + 6, y, fill=BRASS_LIGHT, width=2, tags=tags)
         c.create_line(x, y - r - 6, x, y + r + 6, fill=BRASS_LIGHT, width=2, tags=tags)
         c.create_oval(x - r, y - r, x + r, y + r, outline=WAX, width=2, tags=tags)
@@ -523,6 +550,9 @@ class App(tk.Tk):
                 x, y = self.to_canvas(xy)
                 self.canvas.create_oval(x - 10, y - 10, x + 10, y + 10, fill="", outline="",
                                         tags=("port", self.port_tag(name)))
+        order = {}
+        if self.selected is not None and len(self.routes[self.selected].legs) > 1:
+            order = {name: i for i, name in enumerate(self.routes[self.selected].ports, 1)}
         for name, color in endpoints.items():
             xy = self.view_xy(name)
             if not xy:
@@ -532,6 +562,12 @@ class App(tk.Tk):
             tags = ("port", self.port_tag(name))
             self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=PAPER, outline=color, width=3, tags=tags)
             self.canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline="", tags=tags)
+            if name in self.rules.peace_ports:
+                self.draw_flag(x + r - 1, y - r, tags)
+            if name in order:  # the ports of one chain, in sailing order
+                bx, by = x + r + 1, y - r - 1
+                self.canvas.create_oval(bx - 7, by - 7, bx + 7, by + 7, fill=color, outline=PAPER_HALO, width=1, tags=tags)
+                self.canvas.create_text(bx, by, text=str(order[name]), fill=PAPER, font=(F_MAP[0], 8, "bold"), tags=tags)
             self._label(x, y + r + 6, short(name), tags=tags)
 
     def course_points(self, src: str, dst: str) -> list[tuple[float, float]]:
@@ -543,7 +579,13 @@ class App(tk.Tk):
         return [self.to_canvas(self.cell_to_view(p)) for p in cells]
 
     def draw_route(self, route: router.Route, color, bold=False):
-        pts = self.course_points(route.src, route.dst)
+        for n, leg in enumerate(route.legs, 1):
+            self.draw_leg(leg, color, bold, n if len(route.legs) > 1 else 0)
+        if bold and self.ship_xy and self.nav:
+            self.draw_approach(route.src, color)
+
+    def draw_leg(self, leg, color, bold=False, number=0):
+        pts = self.course_points(leg.src, leg.dst)
         if len(pts) < 2:
             return
         (x0, y0), (x1, y1) = pts[0], pts[-1]
@@ -566,12 +608,16 @@ class App(tk.Tk):
                                 arrowshape=(14 + halo, 18 + halo, 6), capstyle=tk.ROUND, joinstyle=tk.ROUND)
         self.canvas.create_line(flat, fill=color, width=w, arrow=tk.LAST, arrowshape=(14, 18, 6),
                                 capstyle=tk.ROUND, joinstyle=tk.ROUND, dash=() if bold else (14, 6))
-        if bold and self.ship_xy and self.nav:
-            self.draw_approach(route.src, color)
+        # A small tag beside the course, not across it: short hops would disappear under a big label.
+        on_screen = sum(math.dist(a, b) for a, b in zip(pts, pts[1:]))
+        if on_screen < 55 and not bold:
+            return
         mx, my = _midpoint(pts)
-        dist = f" · {route.distance:.1f} кл." if route.distance else ""
-        self._label(mx + nx * 3, my + ny * 3, f"+{router.money(route.plan.profit)}{dist}",
-                    fg=INK, stripe=color, anchor="center")
+        text = f"+{router.money(leg.plan.profit)}"
+        if number:
+            text = f"{number}. {text}"
+        self._label(mx + nx * 2.2, my + ny * 2.2, text, fg=INK, stripe=color, anchor="center",
+                    font=F_MAP_SMALL, pad=2)
 
     def draw_approach(self, src: str, color):
         """Dotted leg from where the ship stands now to the port where the cargo is bought."""
@@ -606,23 +652,26 @@ class App(tk.Tk):
                 mark = "■ " if i < len(ROUTE_COLORS) else "□ "
                 t.insert(tk.END, mark, ("head", blk, f"c{i}"))
                 t.tag_config(f"c{i}", foreground=color)
-                t.insert(tk.END, f"{short(r.src)} → {short(r.dst)}\n", ("head", blk))
-                legs = []
+                t.insert(tk.END, " → ".join(short(n) for n in r.ports) + "\n", ("head", blk))
+                parts = []
                 if r.approach is not None:
-                    legs.append(f"подход {r.approach:.1f}")
+                    parts.append(f"подход {r.approach:.1f}")
                 if r.distance is not None:
-                    legs.append(f"рейс {r.distance:.1f} кл.")
-                legs = " + ".join(legs) + " · " if legs else ""
-                t.insert(tk.END, f"{legs}прибыль +{money(r.plan.profit)} · вложить {money(r.plan.cost)} · "
-                                 f"груз {fmt_units(r.plan.weight)}\n", ("sum", blk))
-                for it in r.plan.items:
-                    batches = f"{it.batches} {plural(it.batches, 'партия', 'партии', 'партий')}"
-                    t.insert(tk.END, f"{it.good:<12}{fmt_units(it.units):>8} шт  {batches:<9} +{money(it.profit)}\n",
-                             ("num", blk))
-                    t.insert(tk.END, f"{'':<12}купить {it.first_buy:.3g}→{it.last_buy:.3g}   "
-                                     f"продать {it.first_sell:.3g}→{it.last_sell:.3g}\n", ("dim", blk))
+                    parts.append(f"путь {r.distance:.1f} кл.")
+                parts = " + ".join(parts) + " · " if parts else ""
+                t.insert(tk.END, f"{parts}прибыль +{money(r.profit)} · вложить {money(r.capital)}\n", ("sum", blk))
+                for n, leg in enumerate(r.legs, 1):
+                    if len(r.legs) > 1:
+                        t.insert(tk.END, f"{n}. {short(leg.src)} → {short(leg.dst)}   +{money(leg.plan.profit)}"
+                                         f"   груз {fmt_units(leg.plan.weight)}\n", ("leg", blk))
+                    for it in leg.plan.items:
+                        batches = f"{it.batches} {plural(it.batches, 'партия', 'партии', 'партий')}"
+                        t.insert(tk.END, f"{it.good:<12}{fmt_units(it.units):>8} шт  {batches:<9} +{money(it.profit)}\n",
+                                 ("num", blk))
+                        t.insert(tk.END, f"{'':<12}купить {it.first_buy:.3g}→{it.last_buy:.3g}   "
+                                         f"продать {it.first_sell:.3g}→{it.last_sell:.3g}\n", ("dim", blk))
                 if r.overload_better:
-                    t.insert(tk.END, f"с перегрузом +{money(r.overload.profit)}, но идти вдвое дольше\n", ("warn", blk))
+                    t.insert(tk.END, f"с перегрузом +{money(r.overload_profit)}, но идти вдвое дольше\n", ("warn", blk))
                 t.insert(tk.END, "\n", (blk,))
                 t.tag_bind(blk, "<Button-1>", lambda e, i=i: self.select_route(i))
                 t.tag_bind(blk, "<Enter>", lambda e, i=i: self.set_hover(i))
@@ -692,6 +741,8 @@ class App(tk.Tk):
                 rows.append((f"{g:<12}{v.get('buy') or '—':>8}{v.get('sell') or '—':>9}{stock:>11}", F_NUM_SMALL, INK))
         else:
             rows.append(("цен ещё нет — наведи курсор на порт в игре", F_SMALL_ITALIC, INK_FAINT))
+        if name in self.rules.peace_ports:
+            rows.insert(1, ("под мирным флагом вход закрыт", F_SMALL_ITALIC, INK_SOFT))
         if self.nav and not self.nav.reachable(name):
             rows.insert(1, (f"кораблю ранга {navigation.roman(self.rank)} сюда не зайти", F_SMALL_ITALIC, WAX))
         x, y = mx + 18, my + 18
@@ -745,7 +796,8 @@ class App(tk.Tk):
         self.mode = "routes"
         self.rebuild_nav()
         self.routes = router.find_routes(self.store.ports, self.sort.get(), hold=self.hold.get(),
-                                         hold_overload=self.hold_overload.get(), nav=self.nav)
+                                         hold_overload=self.hold_overload.get(), nav=self.nav,
+                                         legs=int(self.legs.get()))
         self.selected = None
         self.refresh_list()
         if animate and entering and self.routes:
@@ -754,6 +806,18 @@ class App(tk.Tk):
         else:
             self.reveal = None
             self.redraw()
+
+    def save_rules(self):
+        navigation.save_rules(self.rules)
+
+    def on_peace_change(self):
+        self.save_settings()
+        self.rebuild_nav(force=True)
+        self.build_routes(animate=False) if self.mode == "routes" else self.redraw()
+
+    def on_plan_change(self):
+        self.save_settings()
+        self.build_routes(animate=False)
 
     def on_rank_change(self):
         self.save_settings()
@@ -813,8 +877,11 @@ class App(tk.Tk):
     def close_zone(self):
         if self.mode != "shallows" or len(self.draft) < 3:
             return
-        self.zones.append(navigation.Zone(int(self.zone_rank.get()), [list(p) for p in self.draft]))
-        navigation.save_zones(self.zones)
+        kind = self.zone_rank.get()
+        zone = (navigation.Zone(0, [list(p) for p in self.draft], navigation.PEACE)
+                if kind == navigation.PEACE else navigation.Zone(int(kind), [list(p) for p in self.draft]))
+        self.zones.append(zone)
+        self.save_rules()
         self.draft = []
         self.save_settings()
         self.rebuild_nav(force=True)
@@ -837,7 +904,7 @@ class App(tk.Tk):
             if hint and hint != z.rank:
                 z.rank, changed = hint, changed + 1
         if changed:
-            navigation.save_zones(self.zones)
+            self.save_rules()
             self.rebuild_nav(force=True)
         empty = sum(1 for z in self.zones if navigation.suggest_rank(z, ranks) is None)
         messagebox.showinfo("Ранги по портам",
@@ -883,11 +950,19 @@ class App(tk.Tk):
         return None
 
     def on_drag_start(self, e):
+        if self.mode == "shallows" and (e.state & 0x0004):  # Ctrl: this port is closed to the peace flag
+            name = self._port_at(e.x, e.y)
+            if name:
+                self.rules.peace_ports ^= {name}
+                self.save_rules()
+                self.rebuild_nav(force=True)
+                self.redraw()
+            return
         if self.mode == "shallows" and (e.state & 0x0001):  # Shift: re-rank the zone under the cursor
             zone = self.zone_at(self.canvas_to_cells(e.x, e.y))
-            if zone:
+            if zone and zone.kind == navigation.SHALLOW and self.zone_rank.get() != navigation.PEACE:
                 zone.rank = int(self.zone_rank.get())
-                navigation.save_zones(self.zones)
+                self.save_rules()
                 self.rebuild_nav(force=True)
                 self.redraw()
             return
@@ -956,6 +1031,8 @@ class App(tk.Tk):
         try:
             data = {"hold": int(self.hold.get()), "hold_overload": int(self.hold_overload.get()),
                     "ship_rank": self.rank, "zone_rank": int(self.zone_rank.get()),
+                    "legs": int(self.legs.get()), "sort": self.sort.get(),
+                    "peace": bool(self.peace.get()),
                     "ship_xy": list(self.ship_xy) if self.ship_xy else None}
         except (tk.TclError, ValueError):
             return False
@@ -978,7 +1055,7 @@ class App(tk.Tk):
             if zone and messagebox.askyesno("Стереть зону",
                                             f"Убрать зону {navigation.zone_label(zone.rank)} с карты?"):
                 self.zones.remove(zone)
-                navigation.save_zones(self.zones)
+                self.save_rules()
                 self.rebuild_nav(force=True)
                 self.redraw()
             return

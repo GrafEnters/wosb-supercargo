@@ -59,10 +59,21 @@ def min_rank(shallow) -> int | None:
     return None
 
 
+PEACE = "peace"  # a zone closed to ships flying the peace flag (the central circle, for one)
+SHALLOW = "shallow"
+
+
 @dataclass
 class Zone:
-    rank: int  # ranks rank..VII may enter
+    rank: int  # ranks rank..VII may enter; 0 for peace zones
     points: list[list[float]]  # map cells
+    kind: str = SHALLOW
+
+    def blocks(self, ship_rank: int, peace: bool) -> bool:
+        return self.rank > ship_rank if self.kind == SHALLOW else peace
+
+    def label(self) -> str:
+        return "мирный флаг" if self.kind == PEACE else zone_label(self.rank)
 
     @property
     def xy(self) -> np.ndarray:
@@ -73,15 +84,27 @@ class Zone:
         return float(p[:, 0].mean()), float(p[:, 1].mean())
 
 
-def load_zones(path: Path = ZONES_PATH) -> list[Zone]:
+@dataclass
+class Rules:
+    """What the map forbids: shallow zones, peace-flag zones, and ports closed to the peace flag."""
+    zones: list[Zone]
+    peace_ports: set[str]
+
+
+def load_rules(path: Path = ZONES_PATH) -> Rules:
     if not path.exists():
-        return []
+        return Rules([], set())
     data = json.loads(path.read_text(encoding="utf-8"))
-    return [Zone(z["rank"], z["points"]) for z in data.get("zones", [])]
+    zones = [Zone(z.get("rank", 0), z["points"], z.get("kind", SHALLOW)) for z in data.get("zones", [])]
+    return Rules(zones, set(data.get("peace_ports", [])))
 
 
-def save_zones(zones: list[Zone], path: Path = ZONES_PATH):
-    data = {"zones": [{"rank": z.rank, "points": [[round(x, 3), round(y, 3)] for x, y in z.points]} for z in zones]}
+def save_rules(rules: Rules, path: Path = ZONES_PATH):
+    data = {
+        "zones": [{"rank": z.rank, "kind": z.kind,
+                   "points": [[round(x, 3), round(y, 3)] for x, y in z.points]} for z in rules.zones],
+        "peace_ports": sorted(rules.peace_ports),
+    }
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)
@@ -108,6 +131,8 @@ def points_in_polygon(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
 def suggest_rank(zone: Zone, port_ranks: dict[tuple[float, float], int]) -> int | None:
     """Rank of a zone read off the ports inside it: the water has to admit the largest ship
     any of them accepts, so the least strict port wins."""
+    if zone.kind == PEACE:
+        return None
     inside = [rank for xy, rank in port_ranks.items()
               if rank and points_in_polygon(np.asarray([xy]), zone.xy)[0]]
     return min(inside) if inside else None
@@ -119,9 +144,12 @@ class Navigator:
     SAMPLES = 7  # points along a segment tested for being inside a zone
 
     def __init__(self, zones: list[Zone], ship_rank: int, ports: dict[str, tuple[float, float]],
-                 port_ranks: dict[str, int | None] | None = None):
+                 port_ranks: dict[str, int | None] | None = None, peace: bool = False,
+                 peace_ports: set[str] | None = None):
         self.ship_rank = ship_rank
-        self.blocking = [z for z in zones if z.rank > ship_rank]
+        self.peace = peace
+        self.peace_ports = set(peace_ports or ())
+        self.blocking = [z for z in zones if z.blocks(ship_rank, peace)]
         self.polys = [z.xy for z in self.blocking]
         self.names = list(ports)
         port_ranks = port_ranks or {}
@@ -138,7 +166,7 @@ class Navigator:
         for name in self.names:
             rank = port_ranks.get(name)
             inside = any(points_in_polygon(np.asarray([ports[name]]), poly)[0] for poly in self.polys)
-            if (rank and rank > ship_rank) or inside:
+            if (rank and rank > ship_rank) or inside or (peace and name in self.peace_ports):
                 self.blocked_ports.add(name)
 
         self._edges()

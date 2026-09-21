@@ -133,44 +133,90 @@ def plan_trip(src: dict, dst: dict, goods: dict[str, dict], capacity: float) -> 
 
 
 @dataclass
-class Route:
+class Leg:
+    """One hop: buy in src, sail, sell in dst."""
     src: str
     dst: str
     distance: float | None  # map grid cells along the sailed course
     plan: Plan  # normal load
     overload: Plan  # max load, 2x slower
-    approach: float | None = None  # cells from the ship's current position to the source port
+
+
+@dataclass
+class Route:
+    """One or two hops in a row: A->B, or A->B->C where the money from the first hop pays for the second."""
+    legs: list[Leg]
+    approach: float | None = None  # cells from the ship's current position to the first port
+
+    @property
+    def src(self) -> str:
+        return self.legs[0].src
+
+    @property
+    def dst(self) -> str:
+        return self.legs[-1].dst
+
+    @property
+    def ports(self) -> list[str]:
+        return [self.legs[0].src] + [leg.dst for leg in self.legs]
+
+    @property
+    def profit(self) -> float:
+        return sum(leg.plan.profit for leg in self.legs)
+
+    @property
+    def distance(self) -> float | None:
+        known = [leg.distance for leg in self.legs if leg.distance is not None]
+        return sum(known) if known else None
 
     @property
     def sail(self) -> float:
-        """Everything the ship has to sail before the cargo is sold."""
+        """Everything the ship has to sail before the last cargo is sold."""
         return (self.distance or 0.0) + (self.approach or 0.0)
 
     @property
     def per_cell(self) -> float:
-        return self.plan.profit / max(self.sail, 0.5)
+        return self.profit / max(self.sail, 0.5)
+
+    @property
+    def capital(self) -> float:
+        """Most money needed at once: later hops are paid for with what the earlier ones earned."""
+        need = banked = 0.0
+        for leg in self.legs:
+            need = max(need, leg.plan.cost - banked)
+            banked += leg.plan.profit
+        return need
+
+    @property
+    def overload_profit(self) -> float:
+        return sum(leg.overload.profit for leg in self.legs)
 
     @property
     def overload_better(self) -> bool:
         """Is sailing overloaded more profitable per unit of time?"""
-        return self.overload.profit / OVERLOAD_SLOWDOWN > self.plan.profit * 1.02
+        return self.overload_profit / OVERLOAD_SLOWDOWN > self.profit * 1.02
 
 
 SORT_KEYS = {
-    "trip": lambda r: r.plan.profit,
+    "trip": lambda r: r.profit,
     "distance": lambda r: r.per_cell,
 }
+TOP_ROUTES = 60  # how many routes are built in full; the rest never make it to the manifest
 
 
 def find_routes(ports: dict[str, dict], sort: str = "trip", goods: dict | None = None,
-                hold: float = HOLD, hold_overload: float = HOLD_OVERLOAD, nav=None) -> list[Route]:
+                hold: float = HOLD, hold_overload: float = HOLD_OVERLOAD, nav=None,
+                legs: int = 1) -> list[Route]:
     """nav (navigation.Navigator) makes the courses sail around shallow water the ship may not enter
-    and adds the leg from the ship's current position; without it distances are straight lines."""
+    and adds the leg from the ship's current position; without it distances are straight lines.
+    legs=2 also chains two hops, so the cargo bought with the first hop's money is planned too."""
     goods = goods or load_goods()
     ports = sanitize(ports)
     names = [n for n in ports if nav is None or nav.reachable(n)]
+    # None when the ship cannot get there at all (it may be sitting inside a zone it must leave first)
     approach = {n: nav.approach(n) for n in names} if nav and nav.ship_xy else {}
-    routes = []
+
+    hops: dict[tuple[str, str], Leg] = {}
     for src in names:
         sp = ports[src]
         for dst in names:
@@ -186,11 +232,35 @@ def find_routes(ports: dict[str, dict], sort: str = "trip", goods: dict | None =
             else:
                 dist = None
             plan = plan_trip(sp, dp, goods, hold)
-            if plan.profit <= 0:
-                continue
-            routes.append(Route(src, dst, dist, plan, plan_trip(sp, dp, goods, hold_overload),
-                                approach.get(src)))
-    return sorted(routes, key=SORT_KEYS[sort], reverse=True)
+            if plan.profit > 0:
+                hops[(src, dst)] = Leg(src, dst, dist, plan, plan_trip(sp, dp, goods, hold_overload))
+
+    by_source: dict[str, list[Leg]] = {}
+    for leg in hops.values():
+        by_source.setdefault(leg.src, []).append(leg)
+
+    # Score plain numbers first and only build the best routes: two hops over 40 ports is ~60k combinations.
+    per_cell = sort == "distance"
+
+    def score(profit, sail):
+        return profit / max(sail, 0.5) if per_cell else profit
+
+    scored = []
+    for (src, dst), leg in hops.items():
+        start = approach.get(src) or 0.0
+        scored.append((score(leg.plan.profit, start + (leg.distance or 0)), src, dst, None))
+        if legs > 1:
+            for nxt in by_source.get(dst, ()):
+                profit = leg.plan.profit + nxt.plan.profit
+                sail = start + (leg.distance or 0) + (nxt.distance or 0)
+                scored.append((score(profit, sail), src, dst, nxt.dst))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    routes = []
+    for _, src, dst, third in scored[:TOP_ROUTES]:
+        chain = [hops[(src, dst)]] + ([hops[(dst, third)]] if third else [])
+        routes.append(Route(chain, approach.get(src)))
+    return routes
 
 
 def money(x: float) -> str:
@@ -202,11 +272,17 @@ def format_routes(routes: list[Route], limit: int = 10) -> str:
         return "Выгодных рейсов пока нет - нужно снять цены хотя бы с двух портов."
     out = []
     for r in routes[:limit]:
-        dist = f"{r.distance:.1f} кл." if r.distance else "?"
+        legs = " -> ".join(r.ports)
+        parts = []
         if r.approach:
-            dist = f"подход {r.approach:.1f} + {dist}"
-        out.append(f"{r.src} -> {r.dst}  {dist}  прибыль {money(r.plan.profit)}, вложить {money(r.plan.cost)}")
-        for it in r.plan.items:
-            out.append(f"    {it.good:<12} {it.units:>7} шт ({it.batches} парт.)  "
-                       f"{it.first_buy:g}..{it.last_buy:.3g} -> {it.first_sell:g}..{it.last_sell:.3g}  +{money(it.profit)}")
+            parts.append(f"подход {r.approach:.1f}")
+        if r.distance is not None:
+            parts.append(f"путь {r.distance:.1f} кл.")
+        out.append(f"{legs}  {', '.join(parts)}  прибыль {money(r.profit)}, вложить {money(r.capital)}")
+        for leg in r.legs:
+            out.append(f"  {leg.src} -> {leg.dst}:")
+            for it in leg.plan.items:
+                out.append(f"    {it.good:<12} {it.units:>7} шт ({it.batches} парт.)  "
+                           f"{it.first_buy:g}..{it.last_buy:.3g} -> {it.first_sell:g}..{it.last_sell:.3g}  "
+                           f"+{money(it.profit)}")
     return "\n".join(out)

@@ -122,6 +122,28 @@ class Chip(tk.Label):
             self.config(bg=PAPER if not hover else PAPER_DIM, fg=INK_SOFT, highlightbackground=PAPER_LINE)
 
 
+class Check(tk.Label):
+    """Checkbox drawn as a ticked box on parchment."""
+
+    def __init__(self, parent, text, variable: tk.BooleanVar, command, bg=PAPER):
+        self.variable, self.command, self.text, self.back = variable, command, text, bg
+        super().__init__(parent, font=F_SMALL, bg=bg, cursor="hand2", anchor="w")
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<Enter>", lambda e: self._paint(True))
+        self.bind("<Leave>", lambda e: self._paint())
+        variable.trace_add("write", lambda *_: self._paint())
+        self._paint()
+
+    def _toggle(self, _):
+        self.variable.set(not self.variable.get())
+        self.command()
+
+    def _paint(self, hover=False):
+        on = bool(self.variable.get())
+        self.config(text=f"{'☑' if on else '☐'}  {self.text}",
+                    fg=(BRASS_DARK if on else INK_SOFT) if not hover else INK)
+
+
 class Divider(tk.Canvas):
     """Thin rule with a brass diamond in the middle."""
 

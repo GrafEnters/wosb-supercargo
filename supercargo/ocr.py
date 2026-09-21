@@ -1,5 +1,6 @@
 """Windows built-in OCR (Windows.Media.Ocr) wrapper."""
 import asyncio
+import threading
 from dataclasses import dataclass
 
 from PIL import Image
@@ -9,6 +10,7 @@ from winrt.windows.media.ocr import OcrEngine
 from winrt.windows.storage.streams import DataWriter
 
 _engine = None
+_lock = threading.Lock()  # the engine refuses two RecognizeAsync calls at once
 
 
 def _get_engine():
@@ -68,7 +70,8 @@ def recognize(img: Image.Image, scale: float = 1.0) -> list[Line]:
     max_dim = OcrEngine.max_image_dimension
     if max(img.size) > max_dim:
         raise ValueError(f"image too large for OCR ({img.size}, max {max_dim})")
-    result = asyncio.run(_recognize(img))
+    with _lock:
+        result = asyncio.run(_recognize(img))
     lines = []
     for ln in result.lines:
         words = []
