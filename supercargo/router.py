@@ -136,13 +136,19 @@ def plan_trip(src: dict, dst: dict, goods: dict[str, dict], capacity: float) -> 
 class Route:
     src: str
     dst: str
-    distance: float | None  # map grid cells, straight line
+    distance: float | None  # map grid cells along the sailed course
     plan: Plan  # normal load
     overload: Plan  # max load, 2x slower
+    approach: float | None = None  # cells from the ship's current position to the source port
+
+    @property
+    def sail(self) -> float:
+        """Everything the ship has to sail before the cargo is sold."""
+        return (self.distance or 0.0) + (self.approach or 0.0)
 
     @property
     def per_cell(self) -> float:
-        return self.plan.profit / max(self.distance or 0, 0.5)
+        return self.plan.profit / max(self.sail, 0.5)
 
     @property
     def overload_better(self) -> bool:
@@ -157,19 +163,33 @@ SORT_KEYS = {
 
 
 def find_routes(ports: dict[str, dict], sort: str = "trip", goods: dict | None = None,
-                hold: float = HOLD, hold_overload: float = HOLD_OVERLOAD) -> list[Route]:
+                hold: float = HOLD, hold_overload: float = HOLD_OVERLOAD, nav=None) -> list[Route]:
+    """nav (navigation.Navigator) makes the courses sail around shallow water the ship may not enter
+    and adds the leg from the ship's current position; without it distances are straight lines."""
     goods = goods or load_goods()
     ports = sanitize(ports)
+    names = [n for n in ports if nav is None or nav.reachable(n)]
+    approach = {n: nav.approach(n) for n in names} if nav and nav.ship_xy else {}
     routes = []
-    for src, sp in ports.items():
-        for dst, dp in ports.items():
+    for src in names:
+        sp = ports[src]
+        for dst in names:
             if src == dst:
                 continue
+            dp = ports[dst]
+            if nav is not None:
+                dist = nav.distance(src, dst)
+                if dist is None:  # no way around the shallows for this ship
+                    continue
+            elif sp.get("map_xy") and dp.get("map_xy"):
+                dist = math.dist(sp["map_xy"], dp["map_xy"])
+            else:
+                dist = None
             plan = plan_trip(sp, dp, goods, hold)
             if plan.profit <= 0:
                 continue
-            dist = math.dist(sp["map_xy"], dp["map_xy"]) if sp.get("map_xy") and dp.get("map_xy") else None
-            routes.append(Route(src, dst, dist, plan, plan_trip(sp, dp, goods, hold_overload)))
+            routes.append(Route(src, dst, dist, plan, plan_trip(sp, dp, goods, hold_overload),
+                                approach.get(src)))
     return sorted(routes, key=SORT_KEYS[sort], reverse=True)
 
 
@@ -183,6 +203,8 @@ def format_routes(routes: list[Route], limit: int = 10) -> str:
     out = []
     for r in routes[:limit]:
         dist = f"{r.distance:.1f} кл." if r.distance else "?"
+        if r.approach:
+            dist = f"подход {r.approach:.1f} + {dist}"
         out.append(f"{r.src} -> {r.dst}  {dist}  прибыль {money(r.plan.profit)}, вложить {money(r.plan.cost)}")
         for it in r.plan.items:
             out.append(f"    {it.good:<12} {it.units:>7} шт ({it.batches} парт.)  "
