@@ -105,6 +105,14 @@ def points_in_polygon(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
     return (hits % 2 == 1).reshape(points.shape[:-1])
 
 
+def suggest_rank(zone: Zone, port_ranks: dict[tuple[float, float], int]) -> int | None:
+    """Rank of a zone read off the ports inside it: the water has to admit the largest ship
+    any of them accepts, so the least strict port wins."""
+    inside = [rank for xy, rank in port_ranks.items()
+              if rank and points_in_polygon(np.asarray([xy]), zone.xy)[0]]
+    return min(inside) if inside else None
+
+
 class Navigator:
     """Distances between ports for one ship rank, going around the zones it may not enter."""
 

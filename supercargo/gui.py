@@ -249,9 +249,12 @@ class App(tk.Tk):
         self.zone_btn = Button(admin_btns, "Мелководье", self.toggle_zones)
         self.zone_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.zone_panel = tk.Frame(self.admin_frame, bg=WOOD)
-        tk.Label(self.zone_panel, text="Ранг зоны", bg=WOOD, fg=INK_FAINT, font=F_SMALL).pack(side=tk.LEFT, padx=(0, 6))
+        chips = tk.Frame(self.zone_panel, bg=WOOD)
+        chips.pack(anchor="w")
+        tk.Label(chips, text="Ранг зоны", bg=WOOD, fg=INK_FAINT, font=F_SMALL).pack(side=tk.LEFT, padx=(0, 6))
         for r in range(2, navigation.MAX_RANK + 1):
-            Chip(self.zone_panel, navigation.roman(r), str(r), self.zone_rank, lambda: None).pack(side=tk.LEFT, padx=(0, 3))
+            Chip(chips, navigation.roman(r), str(r), self.zone_rank, lambda: None).pack(side=tk.LEFT, padx=(0, 3))
+        Button(self.zone_panel, "Ранги по портам", self.ranks_from_ports).pack(anchor="w", pady=(5, 0))
         self.admin = False
 
         self.bind("<Return>", lambda e: self.close_zone())
@@ -292,9 +295,10 @@ class App(tk.Tk):
             blocked = sum(1 for z in self.zones if z.rank > self.rank)
             self.sub.config(text=f"{len(self.zones)} {plural(len(self.zones), 'зона', 'зоны', 'зон')} · "
                                  f"{blocked} не по зубам рангу {navigation.roman(self.rank)}")
-            hint = ("Клик по карте ставит вершину, клик по первой вершине или Enter замыкает зону. "
-                    "Backspace убирает точку, Esc бросает начатое. Правый клик по готовой зоне — стереть её. "
-                    "Ранг зоны выбирается внизу: VI значит «ранги VI–VII пройдут».")
+            hint = ("Клик ставит вершину, клик по первой вершине или Enter замыкает зону. Backspace убирает "
+                    "точку, Esc бросает начатое, правый клик по зоне стирает её. Ранг внизу: VI значит "
+                    "«пройдут ранги VI–VII». Shift+клик ставит выбранный ранг готовой зоне, "
+                    "«Ранги по портам» проставит их сам по подсказкам портов.")
         elif self.mode == "edit":
             self.heading.config(text="Поправка карты")
             self.sub.config(text=f"{len(names)} {plural(len(names), 'порт', 'порта', 'портов')} в журнале")
@@ -440,8 +444,12 @@ class App(tk.Tk):
             self.canvas.create_polygon(pts, fill=color, stipple="gray25" if blocked else "gray12",
                                        outline=color, width=1, dash=(5, 4))
             cx, cy = self.to_canvas(self.cell_to_view(z.centroid()))
-            self._label(cx, cy, navigation.zone_label(z.rank), fg=color, bg=PAPER_DIM,
-                        font=F_MAP_SMALL, anchor="center")
+            text = navigation.zone_label(z.rank)
+            if self.mode == "shallows":
+                hint = navigation.suggest_rank(z, self.port_ranks_by_xy())
+                if hint and hint != z.rank:
+                    text += f"  порты: {navigation.roman(hint)}"
+            self._label(cx, cy, text, fg=color, bg=PAPER_DIM, font=F_MAP_SMALL, anchor="center")
 
     def draw_draft(self):
         """The zone currently being drawn, with a rubber band to the cursor."""
@@ -812,6 +820,31 @@ class App(tk.Tk):
         self.rebuild_nav(force=True)
         self.redraw()
 
+    def port_ranks_by_xy(self) -> dict[tuple[float, float], int]:
+        out = {}
+        for name, port in self.store.ports.items():
+            xy, rank = self.store.position(name), navigation.min_rank(port.get("shallow"))
+            if xy and rank:
+                out[tuple(xy)] = rank
+        return out
+
+    def ranks_from_ports(self):
+        """Set every zone's rank from the ports inside it - the game already tells us their limits."""
+        ranks = self.port_ranks_by_xy()
+        changed = 0
+        for z in self.zones:
+            hint = navigation.suggest_rank(z, ranks)
+            if hint and hint != z.rank:
+                z.rank, changed = hint, changed + 1
+        if changed:
+            navigation.save_zones(self.zones)
+            self.rebuild_nav(force=True)
+        empty = sum(1 for z in self.zones if navigation.suggest_rank(z, ranks) is None)
+        messagebox.showinfo("Ранги по портам",
+                            f"Поправлено зон: {changed}.\n"
+                            f"Без портов внутри (ранг остался прежним): {empty}.")
+        self.redraw()
+
     def zone_at(self, cell):
         for z in reversed(self.zones):
             if navigation.points_in_polygon(np.asarray([cell]), z.xy)[0]:
@@ -850,6 +883,14 @@ class App(tk.Tk):
         return None
 
     def on_drag_start(self, e):
+        if self.mode == "shallows" and (e.state & 0x0001):  # Shift: re-rank the zone under the cursor
+            zone = self.zone_at(self.canvas_to_cells(e.x, e.y))
+            if zone:
+                zone.rank = int(self.zone_rank.get())
+                navigation.save_zones(self.zones)
+                self.rebuild_nav(force=True)
+                self.redraw()
+            return
         if self.placing_ship:
             self.set_ship(self.canvas_to_cells(e.x, e.y))
             self.arm_ship()
