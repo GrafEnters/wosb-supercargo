@@ -1,65 +1,101 @@
-"""Map window: ports are scanned automatically while you hover them on the in-game map;
-see progress on the map and get routes drawn as arrows.
+"""The supercargo's logbook: a top-down map with the ports, and the manifest of the best runs.
+
+Ports are scanned automatically while you hover them on the in-game map.
 
 Modes:
-  collect - after "Обновить данные": every known port is gray until rescanned, then gets a green check;
-  routes  - best routes drawn as arrows on the map, no scan markers;
-  edit    - "Двигать порты": drag port markers to fix their positions (saved to ports_layout.json).
+  collect - after "Новая опись": every known port is faded until rescanned, then gets a check mark;
+  routes  - best runs drawn as course lines on the map, the manifest lists what to buy;
+  edit    - admin only: drag port markers to fix their positions (saved to ports_layout.json).
 """
 import json
 import math
 import queue
-import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
 from PIL import Image, ImageTk
 
 from . import mapgeo, router
 from .autoscan import AutoScanner
 from .store import Store
+from .theme import (AMBER, BRASS, BRASS_DARK, BRASS_LIGHT, F_HEAD, F_MAP, F_MAP_SMALL, F_NUM, F_NUM_SMALL,
+                    F_SMALL, F_SMALL_ITALIC, F_SUBTITLE, F_SYMBOL, F_TITLE, F_UI, F_UI_BOLD, INK, INK_FAINT,
+                    INK_SOFT, PAPER, PAPER_DIM, PAPER_HALO, PAPER_LINE, ROUTE_COLORS, SEA, SEA_LIGHT, WAX, WOOD,
+                    WOOD_LIGHT, Button, Chip, Divider, Field, ThinScrollbar, mix, wood_texture)
 
-DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"
-# Clean top-down map (rectified from a screenshot with mapgeo), VIEW_PX_PER_CELL px per cell.
-BACKGROUND = Path(__file__).resolve().parent / "background_map.png"
+HERE = Path(__file__).resolve().parent
+BACKGROUND = HERE / "background_map.png"  # clean top-down map, VIEW_PX_PER_CELL px per cell
+ICON = HERE / "icon.ico"
+SETTINGS = HERE.parent / "data" / "settings.json"
 
-ROUTE_COLORS = ["#d62828", "#1d4ed8", "#7b2cbf", "#2a9d3f", "#f77f00"]
-SORT_LABELS = {"trip": "Прибыль за рейс", "distance": "Прибыль на клетку пути"}
-SETTINGS = Path(__file__).resolve().parent.parent / "data" / "settings.json"
-MARKER_R = 13
+SORT_LABELS = {"trip": "за рейс", "distance": "на клетку пути"}
+MARKER_R = 12
 VIEW_PX_PER_CELL = 100
+MAP_MARGIN = 26  # wood showing around the map
+SIDEBAR_W = 470
 
 
 def short(port: str) -> str:
     return port.replace("Бухта ", "").replace("Порт ", "")
 
 
+def fmt_units(n: float) -> str:
+    return f"{n:,.0f}".replace(",", " ")
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(n) % 100
+    if 11 <= n <= 19:
+        return many
+    return {1: one, 2: few, 3: few, 4: few}.get(n % 10, many)
+
+
+def age_text(seconds: float) -> str:
+    m = max(0, int(seconds // 60))
+    if m < 1:
+        return "только что"
+    if m < 60:
+        return f"{m} мин назад"
+    h = m // 60
+    return f"{h} {plural(h, 'час', 'часа', 'часов')} назад"
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Суперкарго - World of Sea Battle")
-        self.geometry("1500x900")
-        self.configure(bg="#1e1e1e")
+        self.title("Суперкарго · World of Sea Battle")
+        self.geometry("1540x920")
+        self.minsize(1100, 700)
+        self.configure(bg=WOOD)
+        try:
+            self.iconbitmap(str(ICON))
+        except tk.TclError:
+            pass
         self.store = Store()
-        self.view = Image.open(BACKGROUND).convert("RGB")  # top-down background map
+        self.view = Image.open(BACKGROUND).convert("RGB")
         self.view_tk = None
         self.view_tk_key = None
+        self.wood_tk = None
+        self.wood_key = None
         self.routes: list[router.Route] = []
         self.selected: int | None = None
+        self.hover_route: int | None = None
+        self.reveal: int | None = None  # how many course lines are drawn during the reveal animation
+        self.tip_port: str | None = None
         self.sort = tk.StringVar(value="trip")
         settings = self.load_settings()
         self.hold = tk.IntVar(value=settings.get("hold", router.HOLD))
         self.hold_overload = tk.IntVar(value=settings.get("hold_overload", router.HOLD_OVERLOAD))
-        self.list_rows: list[int | None] = []  # listbox row -> route index
         self.events: queue.Queue = queue.Queue()
+        self.mode = "collect"
+        self.mode_before_edit = "collect"
 
         self._build_ui()
         if self.all_scanned():
-            self.build_routes()
+            self.build_routes(animate=False)
         else:
-            self.mode = "collect"
             self.refresh_list()
             self.redraw()
         AutoScanner(self.events, self.store.known_goods,
@@ -68,67 +104,105 @@ class App(tk.Tk):
 
     # ---------- UI ----------
     def _build_ui(self):
-        self.canvas = tk.Canvas(self, bg="#1e1e1e", highlightthickness=0)
+        # --- the chart on the table ---
+        self.canvas = tk.Canvas(self, bg=WOOD, highlightthickness=0, bd=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<Button-3>", self.on_right_click)
         self.canvas.bind("<ButtonPress-1>", self.on_drag_start)
         self.canvas.bind("<B1-Motion>", self.on_drag_move)
         self.canvas.bind("<ButtonRelease-1>", self.on_drag_end)
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.canvas.bind("<Leave>", lambda e: self.show_tip(None))
         self.drag: dict | None = None
         self.tag_of: dict[str, str] = {}
         self.name_of: dict[str, str] = {}
 
-        side = tk.Frame(self, bg="#262626", width=440)
+        # --- the logbook ---
+        side = tk.Frame(self, bg=WOOD, width=SIDEBAR_W)
         side.pack(side=tk.RIGHT, fill=tk.Y)
         side.pack_propagate(False)
-        fg, font = "#e8e8e8", ("Segoe UI", 10)
 
-        self.status = tk.Label(side, bg="#262626", fg=fg, font=("Segoe UI", 12, "bold"),
-                               justify=tk.LEFT, anchor="w", wraplength=410)
-        self.status.pack(fill=tk.X, padx=12, pady=(12, 4))
-        self.hint = tk.Label(side, bg="#262626", fg="#a0a0a0", font=font, justify=tk.LEFT,
-                             anchor="w", wraplength=410)
-        self.hint.pack(fill=tk.X, padx=12)
+        head = tk.Frame(side, bg=WOOD)
+        head.pack(fill=tk.X, padx=18, pady=(16, 8))
+        title = tk.Frame(head, bg=WOOD)
+        title.pack(anchor="w")
+        tk.Label(title, text="⚓", bg=WOOD, fg=BRASS, font=("Segoe UI Symbol", 17)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(title, text="СУПЕРКАРГО", bg=WOOD, fg=BRASS_LIGHT, font=F_TITLE).pack(side=tk.LEFT)
+        tk.Label(head, text="судовой журнал торговца", bg=WOOD, fg=INK_FAINT, font=F_SUBTITLE).pack(anchor="w", padx=(34, 0))
 
-        btns = tk.Frame(side, bg="#262626")
-        btns.pack(fill=tk.X, padx=12, pady=10)
-        ttk.Button(btns, text="Обновить данные", command=self.refresh).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Построить сейчас", command=self.build_routes).pack(side=tk.LEFT, padx=6)
+        page = tk.Frame(side, bg=PAPER, highlightthickness=1, highlightbackground=BRASS_DARK)
+        page.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
+        self.page = page
 
-        # Admin tools, hidden behind a dim gear in the bottom corner (packed before the list so it stays visible).
-        bottom = tk.Frame(side, bg="#262626")
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 6))
-        gear = tk.Label(bottom, text="⚙", bg="#262626", fg="#3c3c3c", font=("Segoe UI", 9), cursor="hand2")
+        # status block
+        self.heading = tk.Label(page, bg=PAPER, fg=INK, font=F_HEAD, anchor="w")
+        self.heading.pack(fill=tk.X, padx=16, pady=(14, 0))
+        self.progress = tk.Canvas(page, height=8, bg=PAPER, highlightthickness=0, bd=0)
+        self.progress_state = (0, 0)
+        self.progress.bind("<Configure>", lambda e: self._draw_progress())
+        self.sub = tk.Label(page, bg=PAPER, fg=INK_SOFT, font=F_SMALL, anchor="w")
+        self.sub.pack(fill=tk.X, padx=16, pady=(2, 0))
+        self.hint = tk.Label(page, bg=PAPER, fg=INK_SOFT, font=F_SMALL_ITALIC, justify=tk.LEFT, anchor="w",
+                             wraplength=SIDEBAR_W - 70)
+        self.hint.pack(fill=tk.X, padx=16, pady=(8, 0))
+
+        btns = tk.Frame(page, bg=PAPER)
+        btns.pack(fill=tk.X, padx=16, pady=(12, 4))
+        self.refresh_btn = Button(btns, "Новая опись", self.refresh, primary=True)
+        self.refresh_btn.pack(side=tk.LEFT)
+        Button(btns, "Проложить курс", self.build_routes).pack(side=tk.LEFT, padx=(8, 0))
+
+        Divider(page).pack(fill=tk.X, padx=16, pady=(6, 2))
+
+        # ship & sorting
+        ship = tk.Frame(page, bg=PAPER)
+        ship.pack(fill=tk.X, padx=16)
+        Field(ship, "Трюм", self.hold, self.on_hold_change).pack(side=tk.LEFT)
+        Field(ship, "с перегрузом", self.hold_overload, self.on_hold_change).pack(side=tk.LEFT, padx=(14, 0))
+        sort_row = tk.Frame(page, bg=PAPER)
+        sort_row.pack(fill=tk.X, padx=16, pady=(8, 0))
+        tk.Label(sort_row, text="Выгода", bg=PAPER, fg=INK_SOFT, font=F_SMALL).pack(side=tk.LEFT, padx=(0, 6))
+        for k, label in SORT_LABELS.items():
+            Chip(sort_row, label, k, self.sort, lambda: self.build_routes(animate=False)).pack(side=tk.LEFT, padx=(0, 4))
+
+        Divider(page).pack(fill=tk.X, padx=16, pady=(8, 0))
+        tk.Label(page, text="МАНИФЕСТ", bg=PAPER, fg=INK_FAINT, font=F_SMALL, anchor="w").pack(fill=tk.X, padx=16)
+
+        # manifest: a read-only Text styled as ledger pages
+        body = tk.Frame(page, bg=PAPER)
+        body.pack(fill=tk.BOTH, expand=True, padx=(16, 8), pady=(2, 10))
+        self.text = tk.Text(body, bg=PAPER, fg=INK, font=F_UI, wrap=tk.WORD, bd=0, highlightthickness=0,
+                            padx=4, pady=2, cursor="arrow", insertwidth=0, exportselection=False,
+                            selectbackground=PAPER, selectforeground=INK, spacing3=1)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scroll = ThinScrollbar(body, self.text.yview)
+        self.scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
+        self.text.config(yscrollcommand=self.scroll.set)
+        t = self.text
+        t.tag_config("head", font=F_UI_BOLD, spacing1=9)
+        t.tag_config("sum", font=F_SMALL, foreground=INK_SOFT, lmargin1=16, lmargin2=16)
+        t.tag_config("num", font=F_NUM, foreground=INK, lmargin1=16, lmargin2=16)
+        t.tag_config("dim", font=F_NUM_SMALL, foreground=INK_FAINT, lmargin1=16, lmargin2=16)
+        t.tag_config("warn", font=F_SMALL_ITALIC, foreground=AMBER, lmargin1=16, lmargin2=16)
+        t.tag_config("note", font=F_SMALL_ITALIC, foreground=INK_FAINT, spacing1=6)
+        t.tag_config("hover", background=PAPER_DIM)
+        t.tag_config("sel", background=mix(PAPER, BRASS, 0.28))
+        t.tag_raise("sel", "hover")
+        t.config(state=tk.DISABLED)
+
+        # admin tools behind a dim gear in the corner
+        foot = tk.Frame(side, bg=WOOD)
+        foot.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 8))
+        gear = tk.Label(foot, text="⚙", bg=WOOD, fg=WOOD_LIGHT, font=("Segoe UI Symbol", 10), cursor="hand2")
         gear.pack(side=tk.RIGHT)
         gear.bind("<Button-1>", lambda e: self.toggle_admin())
-        self.admin_frame = tk.Frame(bottom, bg="#262626")
-        self.edit_btn = ttk.Button(self.admin_frame, text="Двигать порты", command=self.toggle_edit)
+        gear.bind("<Enter>", lambda e: gear.config(fg=BRASS_DARK))
+        gear.bind("<Leave>", lambda e: gear.config(fg=WOOD_LIGHT))
+        self.admin_frame = tk.Frame(foot, bg=WOOD)
+        self.edit_btn = Button(self.admin_frame, "Поправить карту", self.toggle_edit)
         self.edit_btn.pack(side=tk.LEFT)
         self.admin = False
-
-        sort_row = tk.Frame(side, bg="#262626")
-        sort_row.pack(fill=tk.X, padx=12)
-        tk.Label(sort_row, text="Сортировка:", bg="#262626", fg=fg, font=font).pack(anchor="w")
-        for k, label in SORT_LABELS.items():
-            tk.Radiobutton(sort_row, text=label, value=k, variable=self.sort, command=self.build_routes,
-                           bg="#262626", fg=fg, selectcolor="#3a3a3a", activebackground="#262626",
-                           activeforeground=fg, font=font).pack(anchor="w", padx=(10, 0))
-
-        hold_row = tk.Frame(side, bg="#262626")
-        hold_row.pack(fill=tk.X, padx=12, pady=(6, 0))
-        for text, var in (("Трюм:", self.hold), ("с перегрузом:", self.hold_overload)):
-            tk.Label(hold_row, text=text, bg="#262626", fg=fg, font=font).pack(side=tk.LEFT)
-            entry = ttk.Spinbox(hold_row, from_=1000, to=1_000_000, increment=5000, width=8, textvariable=var,
-                                command=self.on_hold_change)
-            entry.pack(side=tk.LEFT, padx=(4, 12))
-            entry.bind("<Return>", lambda e: self.on_hold_change())
-            entry.bind("<FocusOut>", lambda e: self.on_hold_change())
-
-        self.route_list = tk.Listbox(side, bg="#1b1b1b", fg=fg, font=("Consolas", 10), activestyle="none",
-                                     selectbackground="#444", highlightthickness=0, borderwidth=0)
-        self.route_list.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
-        self.route_list.bind("<<ListboxSelect>>", self.on_select)
 
     def all_scanned(self) -> bool:
         names = self.store.all_names()
@@ -137,26 +211,46 @@ class App(tk.Tk):
     def update_status(self):
         names = self.store.all_names()
         done = sum(self.store.is_scanned(n) for n in names)
+        self.progress.pack_forget()
         if self.mode == "edit":
-            self.status.config(text=f"Расположение портов: {len(names)}")
-            hint = ("Перетаскивай порты мышью на их значки - позиция сохраняется сразу "
-                    "(supercargo/ports_layout.json). ПКМ по порту - удалить. "
-                    "Нажми «Готово», чтобы вернуться.")
+            self.heading.config(text="Поправка карты")
+            self.sub.config(text=f"{len(names)} {plural(len(names), 'порт', 'порта', 'портов')} в журнале")
+            hint = ("Перетащи метки на значки портов — позиции запишутся сразу. "
+                    "Правый клик по порту — вычеркнуть его из журнала. «Готово» — вернуться.")
         elif self.mode == "collect":
-            self.status.config(text=f"Сбор данных: {done} / {len(names)} портов")
+            self.heading.config(text="Опись цен")
+            self.progress.pack(fill=tk.X, padx=16, pady=(8, 0), after=self.heading)
+            self.progress_state = (done, len(names))
+            self._draw_progress()
+            self.sub.config(text=f"{done} из {len(names)} портов записано" if names else "журнал пуст")
             if not names:
-                hint = "Открой карту в игре и задержи курсор на порту, пока не появится подсказка. Каждый новый порт добавится на карту."
+                hint = ("Разверни карту в игре и задержи курсор на порту, пока не всплывёт подсказка. "
+                        "Каждый новый порт ляжет в журнал сам.")
             else:
-                hint = (f"Открой карту в игре и по очереди задерживай курсор на серых портах. Когда все станут зелёными, "
-                        f"маршрут построится сам. Новые порты добавляются автоматически. "
-                        f"ПКМ по порту - забыть его.")
+                hint = ("Обойди курсором серые порты на карте в игре. Когда все получат отметку, "
+                        "курс проложится сам. Правый клик по порту здесь — вычеркнуть его.")
         else:
+            self.heading.config(text="Курсы проложены")
             oldest = min((p["updated"] for p in self.store.ports.values()), default=time.time())
-            age = max(0.0, time.time() - oldest) / 60
-            self.status.config(text=f"Маршруты по {len(names)} портам")
-            hint = (f"Самым старым ценам {age:.0f} мин. Наведи курсор на порт на карте - его цены обновятся, "
-                    f"«Обновить данные» - пересканировать все порты. Клик по маршруту в списке - показать только его.")
+            self.sub.config(text=f"{len(names)} портов · самая старая запись {age_text(time.time() - oldest)}")
+            hint = ("Наведи курсор на порт в игре — его цены обновятся. Порт на этой карте под курсором "
+                    "покажет свою опись. Клик по курсу в манифесте оставит на карте только его.")
         self.hint.config(text=hint)
+
+    def _draw_progress(self):
+        c = self.progress
+        c.delete("all")
+        w, h = c.winfo_width(), 8
+        done, total = self.progress_state
+        if w < 10:
+            return
+        c.create_rectangle(0, 2, w, h - 2, fill=PAPER_LINE, outline="")
+        if total:
+            fw = w * done / total
+            c.create_rectangle(0, 1, fw, h - 1, fill=BRASS if done < total else SEA, outline="")
+            # rope twist marks
+            for x in range(6, int(fw) - 2, 9):
+                c.create_line(x, 1, x - 3, h - 1, fill=BRASS_DARK if done < total else SEA_LIGHT)
 
     # ---------- geometry ----------
     def view_xy(self, name: str):
@@ -175,11 +269,12 @@ class App(tk.Tk):
         return (xy[0] - bx0) * VIEW_PX_PER_CELL, (xy[1] - by0) * VIEW_PX_PER_CELL
 
     def _transform(self):
-        cw, ch = max(self.canvas.winfo_width(), 1), max(self.canvas.winfo_height(), 1)
+        cw = max(self.canvas.winfo_width() - 2 * MAP_MARGIN, 1)
+        ch = max(self.canvas.winfo_height() - 2 * MAP_MARGIN, 1)
         bx0, by0, bx1, by1 = mapgeo.bounds()
         iw, ih = (bx1 - bx0) * VIEW_PX_PER_CELL, (by1 - by0) * VIEW_PX_PER_CELL
         s = min(cw / iw, ch / ih)
-        return s, (cw - iw * s) / 2, (ch - ih * s) / 2
+        return s, MAP_MARGIN + (cw - iw * s) / 2, MAP_MARGIN + (ch - ih * s) / 2
 
     def to_canvas(self, pos):
         s, ox, oy = self._transform()
@@ -197,65 +292,101 @@ class App(tk.Tk):
     def redraw(self):
         c = self.canvas
         c.delete("all")
+        self.tip_port = None
+        cw, ch = max(c.winfo_width(), 1), max(c.winfo_height(), 1)
+        if self.wood_key != (cw, ch):
+            self.wood_tk = ImageTk.PhotoImage(wood_texture(cw, ch))
+            self.wood_key = (cw, ch)
+        c.create_image(0, 0, image=self.wood_tk, anchor="nw")
+
         s, ox, oy = self._transform()
         size = (max(1, int(self.view.width * s)), max(1, int(self.view.height * s)))
         if self.view_tk_key != size:
             self.view_tk = ImageTk.PhotoImage(self.view.resize(size, Image.LANCZOS))
             self.view_tk_key = size
+        # the chart's shadow and brass-pinned edge
+        c.create_rectangle(ox + 6, oy + 8, ox + size[0] + 6, oy + size[1] + 8, fill="#140d08", outline="")
         c.create_image(ox, oy, image=self.view_tk, anchor="nw")
+        c.create_rectangle(ox - 1, oy - 1, ox + size[0], oy + size[1], outline=BRASS_DARK)
+        for px, py in ((ox + 10, oy + 10), (ox + size[0] - 10, oy + 10), (ox + 10, oy + size[1] - 10),
+                       (ox + size[0] - 10, oy + size[1] - 10)):
+            c.create_oval(px - 4, py - 4, px + 4, py + 4, fill=BRASS, outline=BRASS_DARK)
 
-        if self.mode in ("collect", "edit"):
+        if self.mode == "edit":
             for name in self.store.all_names():
                 xy = self.view_xy(name)
                 if xy:
-                    if self.mode == "edit":
-                        self.draw_edit_marker(name, self.to_canvas(xy))
-                    else:
-                        self.draw_scan_marker(name, self.to_canvas(xy), self.store.is_scanned(name))
+                    self.draw_edit_marker(name, self.to_canvas(xy))
+        elif self.mode == "collect":
+            for name in self.store.all_names():
+                xy = self.view_xy(name)
+                if xy:
+                    self.draw_scan_marker(name, self.to_canvas(xy), self.store.is_scanned(name))
         else:
             self.draw_routes()
-
         self.update_status()
+
+    def _label(self, x, y, text, fg=INK, bg=PAPER, font=F_MAP, tags=(), stripe=None, anchor="n"):
+        t = self.canvas.create_text(x, y, text=text, fill=fg, font=font, tags=tags, anchor=anchor)
+        x0, y0, x1, y1 = self.canvas.bbox(t)
+        pad = 4 if stripe else 3
+        rect = self.canvas.create_rectangle(x0 - pad, y0 - 1, x1 + pad, y1 + 1, fill=bg, outline=PAPER_LINE, tags=tags)
+        self.canvas.tag_lower(rect, t)
+        if stripe:
+            self.canvas.create_rectangle(x0 - pad, y0 - 1, x0 - pad + 3, y1 + 1, fill=stripe, outline="", tags=tags)
 
     def draw_scan_marker(self, name, xy, scanned):
         c, (x, y), r, tags = self.canvas, xy, MARKER_R, ("port", self.port_tag(name))
-        fill, outline = ("#2a9d3f", "#dfffe6") if scanned else ("#6b6b6b", "#d0d0d0")
-        c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline, width=2, tags=tags)
-        c.create_text(x, y, text="✓" if scanned else "?", fill="white", font=("Segoe UI", 11, "bold"), tags=tags)
-        self._label(x, y + r + 9, short(name), "#111", "#f0e6c8", tags=tags)
+        if scanned:
+            c.create_oval(x - r - 1, y - r - 1, x + r + 1, y + r + 1, fill=BRASS_DARK, outline="", tags=tags)
+            c.create_oval(x - r, y - r, x + r, y + r, fill=SEA, outline=BRASS_LIGHT, width=2, tags=tags)
+            c.create_line(x - 5, y + 0.5, x - 1.5, y + 4, x + 5.5, y - 4.5, fill=PAPER, width=2.5,
+                          capstyle=tk.ROUND, joinstyle=tk.ROUND, tags=tags)
+            self._label(x, y + r + 5, short(name), tags=tags)
+        else:
+            c.create_oval(x - r, y - r, x + r, y + r, fill=PAPER, stipple="gray50", outline=INK_SOFT, width=2, tags=tags)
+            c.create_text(x, y, text="?", fill=INK_SOFT, font=(F_MAP[0], 11, "bold"), tags=tags)
+            self._label(x, y + r + 5, short(name), fg=INK_SOFT, bg=PAPER_DIM, font=F_MAP_SMALL, tags=tags)
 
     def draw_edit_marker(self, name, xy):
-        c, (x, y), r, tags = self.canvas, xy, 7, ("port", self.port_tag(name))
-        c.create_line(x - r - 5, y, x + r + 5, y, fill="#00e5ff", width=2, tags=tags)
-        c.create_line(x, y - r - 5, x, y + r + 5, fill="#00e5ff", width=2, tags=tags)
-        c.create_oval(x - r, y - r, x + r, y + r, outline="#00e5ff", width=2, tags=tags)
-        self._label(x, y + r + 14, short(name), "#111", "#bff6ff", tags=tags)
+        c, (x, y), r, tags = self.canvas, xy, 8, ("port", self.port_tag(name))
+        c.create_line(x - r - 6, y, x + r + 6, y, fill=BRASS_LIGHT, width=2, tags=tags)
+        c.create_line(x, y - r - 6, x, y + r + 6, fill=BRASS_LIGHT, width=2, tags=tags)
+        c.create_oval(x - r, y - r, x + r, y + r, outline=WAX, width=2, tags=tags)
+        self._label(x, y + r + 9, short(name), fg=WAX, tags=tags)
 
     def draw_routes(self):
         shown = list(enumerate(self.routes[:len(ROUTE_COLORS)]))
         if self.selected is not None:
             shown = [(self.selected, self.routes[self.selected])]
-        endpoints = {}
-        for i, r in reversed(shown):
-            color = ROUTE_COLORS[i % len(ROUTE_COLORS)] if i < len(ROUTE_COLORS) else "#d62828"
-            self.draw_route(r, color, bold=self.selected is not None)
+        elif self.reveal is not None:
+            shown = shown[:self.reveal]
+        # hovered course goes on top
+        order = sorted(shown, key=lambda ir: (ir[0] == self.hover_route, -ir[0]))
+        endpoints: dict[str, str] = {}
+        for i, r in order:
+            color = ROUTE_COLORS[i % len(ROUTE_COLORS)]
+            bold = self.selected is not None or i == self.hover_route
+            self.draw_route(r, color, bold)
             endpoints.setdefault(r.src, color)
             endpoints.setdefault(r.dst, color)
+        # every port stays hoverable (invisible hit areas), courses' ends get a marker
+        for name in self.store.all_names():
+            xy = self.view_xy(name)
+            if xy and name not in endpoints:
+                x, y = self.to_canvas(xy)
+                self.canvas.create_oval(x - 10, y - 10, x + 10, y + 10, fill="", outline="",
+                                        tags=("port", self.port_tag(name)))
         for name, color in endpoints.items():
             xy = self.view_xy(name)
             if not xy:
                 continue
             x, y = self.to_canvas(xy)
-            r = MARKER_R - 2
+            r = MARKER_R - 3
             tags = ("port", self.port_tag(name))
-            self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=color, width=3, tags=tags)
-            self._label(x, y + r + 10, short(name), "#111", "#f0e6c8", tags=tags)
-
-    def _label(self, x, y, text, fg, bg, font=("Segoe UI", 9, "bold"), tags=()):
-        t = self.canvas.create_text(x, y, text=text, fill=fg, font=font, tags=tags)
-        x0, y0, x1, y1 = self.canvas.bbox(t)
-        rect = self.canvas.create_rectangle(x0 - 3, y0 - 1, x1 + 3, y1 + 1, fill=bg, outline="", tags=tags)
-        self.canvas.tag_lower(rect, t)
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=PAPER, outline=color, width=3, tags=tags)
+            self.canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline="", tags=tags)
+            self._label(x, y + r + 6, short(name), tags=tags)
 
     def draw_route(self, route: router.Route, color, bold=False):
         sp, dp = self.view_xy(route.src), self.view_xy(route.dst)
@@ -265,51 +396,174 @@ class App(tk.Tk):
         length = math.hypot(x1 - x0, y1 - y0) or 1
         ux, uy = (x1 - x0) / length, (y1 - y0) / length
         nx, ny = -uy * 5, ux * 5  # shift sideways so A->B and B->A don't overlap
-        pad = MARKER_R + 1
-        self.canvas.create_line(x0 + ux * pad + nx, y0 + uy * pad + ny, x1 - ux * pad + nx, y1 - uy * pad + ny,
-                                fill=color, width=6 if bold else 4, arrow=tk.LAST, arrowshape=(16, 20, 7),
-                                capstyle=tk.ROUND)
+        pad = MARKER_R + 2
+        pts = (x0 + ux * pad + nx, y0 + uy * pad + ny, x1 - ux * pad + nx, y1 - uy * pad + ny)
+        w = 4 if bold else 3
+        self.canvas.create_line(*pts, fill=PAPER_HALO, width=w + 4, capstyle=tk.ROUND)
+        self.canvas.create_line(*pts, fill=color, width=w, arrow=tk.LAST, arrowshape=(14, 18, 6), capstyle=tk.ROUND,
+                                dash=() if bold else (14, 6))
         dist = f" · {route.distance:.1f} кл." if route.distance else ""
-        self._label((x0 + x1) / 2 + nx * 3, (y0 + y1) / 2 + ny * 3,
-                    f"+{router.money(route.plan.profit)}{dist}", "white", color)
+        self._label((x0 + x1) / 2 + nx * 3, (y0 + y1) / 2 + ny * 3, f"+{router.money(route.plan.profit)}{dist}",
+                    fg=INK, stripe=color, anchor="center")
 
+    # ---------- manifest ----------
     def refresh_list(self):
-        self.route_list.delete(0, tk.END)
-        if self.mode == "collect" or not self.routes:
-            self.route_list.insert(tk.END, "Маршрутов пока нет." if self.mode == "routes"
-                                   else "Маршруты появятся, когда все порты будут отсканированы.")
+        t = self.text
+        t.config(state=tk.NORMAL)
+        t.delete("1.0", tk.END)
+        for tag in t.tag_names():
+            if tag.startswith("blk"):
+                t.tag_delete(tag)
+        if self.mode == "edit":
+            t.insert(tk.END, "Пока карту правят, манифест закрыт.", "note")
+        elif self.mode == "collect" or not self.routes:
+            t.insert(tk.END, "Курсы появятся, когда все порты будут в описи. "
+                             "Нетерпеливым — «Проложить курс» по тому, что уже записано." if self.mode == "collect"
+                     else "Выгодных курсов не нашлось. Загляни в цены ещё раз.", "note")
+        else:
+            money = router.money
+            for i, r in enumerate(self.routes[:30]):
+                blk = f"blk{i}"
+                t.tag_config(blk, lmargin1=0)
+                start = t.index(tk.END + "-1c")
+                color = ROUTE_COLORS[i] if i < len(ROUTE_COLORS) else INK_FAINT
+                mark = "■ " if i < len(ROUTE_COLORS) else "□ "
+                t.insert(tk.END, mark, ("head", blk, f"c{i}"))
+                t.tag_config(f"c{i}", foreground=color)
+                t.insert(tk.END, f"{short(r.src)} → {short(r.dst)}\n", ("head", blk))
+                dist = f"{r.distance:.1f} кл. · " if r.distance else ""
+                t.insert(tk.END, f"{dist}прибыль +{money(r.plan.profit)} · вложить {money(r.plan.cost)} · "
+                                 f"груз {fmt_units(r.plan.weight)}\n", ("sum", blk))
+                for it in r.plan.items:
+                    batches = f"{it.batches} {plural(it.batches, 'партия', 'партии', 'партий')}"
+                    t.insert(tk.END, f"{it.good:<12}{fmt_units(it.units):>8} шт  {batches:<9} +{money(it.profit)}\n",
+                             ("num", blk))
+                    t.insert(tk.END, f"{'':<12}купить {it.first_buy:.3g}→{it.last_buy:.3g}   "
+                                     f"продать {it.first_sell:.3g}→{it.last_sell:.3g}\n", ("dim", blk))
+                if r.overload_better:
+                    t.insert(tk.END, f"с перегрузом +{money(r.overload.profit)}, но идти вдвое дольше\n", ("warn", blk))
+                t.insert(tk.END, "\n", (blk,))
+                t.tag_bind(blk, "<Button-1>", lambda e, i=i: self.select_route(i))
+                t.tag_bind(blk, "<Enter>", lambda e, i=i: self.set_hover(i))
+                t.tag_bind(blk, "<Leave>", lambda e, i=i: self.set_hover(None))
+                if i == self.selected:
+                    t.tag_add("sel", start, tk.END + "-1c")
+        t.config(state=tk.DISABLED)
+        t.yview_moveto(0)
+
+    def set_hover(self, i):
+        if i == self.hover_route:
             return
-        self.list_rows = []
-        money = router.money
+        self.hover_route = i
+        t = self.text
+        t.tag_remove("hover", "1.0", tk.END)
+        if i is not None:
+            for a, b in zip(*[iter(t.tag_ranges(f"blk{i}"))] * 2):
+                t.tag_add("hover", a, b)
+        if self.mode == "routes" and self.selected is None and self.reveal is None:
+            self.redraw()
 
-        def row(text, route_idx, fg="#b8b8b8"):
-            self.route_list.insert(tk.END, text)
-            self.route_list.itemconfig(tk.END, fg=fg)
-            self.list_rows.append(route_idx)
+    def select_route(self, i):
+        if self.mode != "routes":
+            return
+        self.selected = None if self.selected == i else i
+        self.reveal = None
+        t = self.text
+        t.tag_remove("sel", "1.0", tk.END)
+        if self.selected is not None:
+            for a, b in zip(*[iter(t.tag_ranges(f"blk{i}"))] * 2):
+                t.tag_add("sel", a, b)
+        self.redraw()
 
-        for i, r in enumerate(self.routes[:30]):
-            mark = "■" if i < len(ROUTE_COLORS) else " "
-            dist = f"  {r.distance:.1f} кл." if r.distance else ""
-            row(f"{mark} {short(r.src)} -> {short(r.dst)}{dist}", i,
-                ROUTE_COLORS[i] if i < len(ROUTE_COLORS) else "#e8e8e8")
-            for it in r.plan.items:
-                row(f"   {it.good:<11}{it.units:>7,} шт {it.batches:>2} п.  +{money(it.profit)}".replace(",", " "), i)
-                row(f"      купить {it.first_buy:.3g}..{it.last_buy:.3g}  продать {it.first_sell:.3g}..{it.last_sell:.3g}",
-                    i, "#8a8a8a")
-            row(f"   прибыль +{money(r.plan.profit)}, вложить {money(r.plan.cost)}, груз {r.plan.weight:,.0f}"
-                .replace(",", " "), i, "#e8e8e8")
-            if r.overload_better:
-                row(f"   с перегрузом: +{money(r.overload.profit)} (плыть в 2 раза дольше)", i, "#d9a441")
-            row("", None)
+    # ---------- port tooltip on the chart ----------
+    def on_motion(self, e):
+        if self.drag or self.mode == "edit":
+            return
+        self.show_tip(self._port_at(e.x, e.y), e.x, e.y)
+
+    def show_tip(self, name, mx=0, my=0):
+        if name == self.tip_port:
+            return
+        self.canvas.delete("tip")
+        self.tip_port = name
+        if not name:
+            return
+        p = self.store.ports.get(name)
+        c = self.canvas
+        rows = [(name, F_UI_BOLD, INK)]
+        if p:
+            meta = []
+            if p.get("tax") is not None:
+                meta.append(f"налог {p['tax']:g}%")
+            if p.get("shallow"):
+                meta.append(f"мелководье {p['shallow']}")
+            meta.append(age_text(time.time() - p["updated"]))
+            rows.append((" · ".join(meta), F_SMALL_ITALIC, INK_FAINT))
+            rows.append((f"{'товар':<12}{'купить':>8}{'продать':>9}{'на складе':>11}", F_NUM_SMALL, INK_FAINT))
+            for g, v in p["goods"].items():
+                stock = f"{v['stock'] / 1000:.0f}k" if v.get("stock") else "—"
+                rows.append((f"{g:<12}{v.get('buy') or '—':>8}{v.get('sell') or '—':>9}{stock:>11}", F_NUM_SMALL, INK))
+        else:
+            rows.append(("цен ещё нет — наведи курсор на порт в игре", F_SMALL_ITALIC, INK_FAINT))
+        x, y = mx + 18, my + 18
+        items, cy = [], y + 8
+        for text, font, fg in rows:
+            items.append(c.create_text(x + 10, cy, text=text, font=font, fill=fg, anchor="nw", tags="tip"))
+            cy = c.bbox(items[-1])[3] + 3
+        x0 = min(c.bbox(i)[0] for i in items) - 10
+        x1 = max(c.bbox(i)[2] for i in items) + 10
+        y0, y1 = y, cy + 6
+        # keep the card inside the chart
+        dx = min(0, c.winfo_width() - 6 - x1)
+        dy = min(0, c.winfo_height() - 6 - y1)
+        if dx or dy:
+            for i in items:
+                c.move(i, dx, dy)
+            x0, x1, y0, y1 = x0 + dx, x1 + dx, y0 + dy, y1 + dy
+        shadow = c.create_rectangle(x0 + 3, y0 + 4, x1 + 3, y1 + 4, fill="#140d08", outline="", tags="tip")
+        rect = c.create_rectangle(x0, y0, x1, y1, fill=PAPER, outline=BRASS_DARK, tags="tip")
+        c.tag_lower(rect, items[0])
+        c.tag_lower(shadow, rect)
+
+    # ---------- animations ----------
+    def pulse(self, name, step=0):
+        """A ripple around a freshly recorded port."""
+        xy = self.view_xy(name)
+        if not xy or self.mode != "collect":
+            return
+        self.canvas.delete("pulse")
+        if step >= 10:
+            return
+        x, y = self.to_canvas(xy)
+        r = MARKER_R + 3 + step * 2.6
+        self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=mix(BRASS_LIGHT, PAPER, step / 10),
+                                width=max(1, 3 - step * 0.25), tags="pulse")
+        self.after(38, lambda: self.pulse(name, step + 1))
+
+    def _reveal_step(self):
+        if self.mode != "routes" or self.reveal is None:
+            return
+        self.reveal += 1
+        self.redraw()
+        if self.reveal < min(len(self.routes), len(ROUTE_COLORS)):
+            self.after(120, self._reveal_step)
+        else:
+            self.reveal = None
 
     # ---------- actions ----------
-    def build_routes(self):
+    def build_routes(self, animate=True):
+        entering = self.mode != "routes"
         self.mode = "routes"
         self.routes = router.find_routes(self.store.ports, self.sort.get(), hold=self.hold.get(),
                                          hold_overload=self.hold_overload.get())
         self.selected = None
         self.refresh_list()
-        self.redraw()
+        if animate and entering and self.routes:
+            self.reveal = 0
+            self._reveal_step()
+        else:
+            self.reveal = None
+            self.redraw()
 
     def toggle_admin(self):
         self.admin = not self.admin
@@ -322,9 +576,9 @@ class App(tk.Tk):
 
     def toggle_edit(self):
         if self.mode == "edit":
-            self.edit_btn.config(text="Двигать порты")
+            self.edit_btn.config(text="Поправить карту")
             if self.mode_before_edit == "routes":
-                self.build_routes()  # distances may have changed
+                self.build_routes(animate=False)  # distances may have changed
                 return
             self.mode = self.mode_before_edit
         else:
@@ -370,21 +624,12 @@ class App(tk.Tk):
 
     def refresh(self):
         if self.mode == "edit":
-            self.edit_btn.config(text="Двигать порты")
+            self.edit_btn.config(text="Поправить карту")
         self.mode = "collect"
         self.store.new_session()
-        self.routes, self.selected = [], None
+        self.routes, self.selected, self.reveal = [], None, None
         self.refresh_list()
         self.redraw()
-
-    def on_select(self, _):
-        sel = self.route_list.curselection()
-        if not sel or not self.routes or self.mode != "routes":
-            return
-        i = self.list_rows[sel[0]] if sel[0] < len(self.list_rows) else None
-        if i is not None:
-            self.selected = None if self.selected == i else i
-            self.redraw()
 
     @staticmethod
     def load_settings() -> dict:
@@ -403,13 +648,13 @@ class App(tk.Tk):
         SETTINGS.parent.mkdir(exist_ok=True)
         SETTINGS.write_text(json.dumps({"hold": hold, "hold_overload": over}), encoding="utf-8")
         if self.mode == "routes":
-            self.build_routes()
+            self.build_routes(animate=False)
 
     def on_right_click(self, e):
         name = self._port_at(e.x, e.y)
-        if name and messagebox.askyesno("Забыть порт", f"Убрать «{name}» с карты и из базы?"):
+        if name and messagebox.askyesno("Вычеркнуть порт", f"Убрать «{name}» с карты и из журнала?"):
             self.store.remove(name)
-            self.build_routes() if self.mode == "routes" else self.redraw()
+            self.build_routes(animate=False) if self.mode == "routes" else self.redraw()
 
     def bring_to_front(self):
         self.deiconify()
@@ -422,20 +667,20 @@ class App(tk.Tk):
         try:
             while True:
                 ev = self.events.get_nowait()
-                kind = ev[0]
-                if kind == "scan":
+                if ev[0] == "scan":
                     _, info, map_xy = ev
                     name = self.store.update(info, map_xy=map_xy)
                     print(f"scanned: {name} ({len(info.goods)} goods)")
                     if self.mode == "edit":
                         self.redraw()
                     elif self.mode == "routes":
-                        self.build_routes()  # prices changed: keep the route view up to date
+                        self.build_routes(animate=False)  # prices changed: keep the manifest current
                     elif self.all_scanned():
                         self.build_routes()
                         self.bring_to_front()
                     else:
                         self.redraw()
+                        self.pulse(name)
         except queue.Empty:
             pass
         self.after(50, self.poll)
@@ -446,14 +691,14 @@ def run():
     import sys
     # Started with pythonw (no console): keep prints and tracebacks in a log file.
     if sys.stdout is None or sys.stderr is None:
-        log = open(Path(__file__).resolve().parent.parent / "data" / "supercargo.log", "a", encoding="utf-8", buffering=1)
+        log = open(HERE.parent / "data" / "supercargo.log", "a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stderr = log
     # One instance only: a second scanner would just double every scan.
     ctypes.windll.kernel32.CreateMutexW(None, False, "supercargo-wosb-single-instance")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("Суперкарго", "Суперкарго уже запущен.")
+        messagebox.showinfo("Суперкарго", "Суперкарго уже на борту — второй не нужен.")
         return
     app = App()
     app.report_callback_exception = lambda *exc: __import__("traceback").print_exception(*exc)
