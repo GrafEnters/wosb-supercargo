@@ -39,6 +39,7 @@ class AutoScanner(threading.Thread):
         self.hwnd = None
         self.hwnd_checked = 0.0
         self.last_name, self.last_time = None, 0.0
+        self.last_header = None  # where the tooltip we read last sat on screen
 
     def run(self):
         user32 = ctypes.windll.user32
@@ -77,8 +78,15 @@ class AutoScanner(threading.Thread):
         return self.handle(img, cursor)
 
     def handle(self, img: Image.Image, cursor) -> str:
+        found = tooltip.find_header(img)
+        if found is None:
+            return "retry"
+        fresh = time.time() - self.last_time < SAME_PORT_COOLDOWN
+        if fresh and self.last_header and max(abs(found[0] - self.last_header[0]),
+                                              abs(found[1] - self.last_header[1])) < 4:
+            return "done"  # same tooltip still hanging on screen, already in the logbook
         try:
-            info, _, _ = tooltip.read_from_screenshot(img, self.known_goods())
+            info, _, _ = tooltip.read_from_screenshot(img, self.known_goods(), found)
         except tooltip.TooltipNotFound:
             return "retry"
         if not info.goods:
@@ -90,6 +98,7 @@ class AutoScanner(threading.Thread):
             geo = mapgeo.locate(img)
             map_xy = geo.to_map(*cursor) if geo else None
         self.last_name, self.last_time = info.name, time.time()
+        self.last_header = found[:2]
         self.out.put(("scan", info, map_xy))
         sound.chime()
         return "done"

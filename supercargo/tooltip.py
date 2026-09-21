@@ -3,11 +3,22 @@ import difflib
 import re
 import statistics
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image
 
 from . import numocr, ocr
 from .ocr import Line, Word
+
+# The "Купить / Продать" header is drawn from the same pixels every time, so template matching finds
+# the tooltip ~8x faster than running OCR over the whole screen - and still works on a half-faded one.
+HEADER_TEMPLATE = Path(__file__).resolve().parent / "header_tpl.png"
+TPL_PAD = 3  # where the word "Купить" starts inside the template
+TPL_BUY_H = 15.0  # height of the header text
+TPL_COL_GAP = 79.5  # distance between the "Купить" and "Продать" columns
+TPL_MIN_SCORE = 0.62
 
 KNOWN_GOODS = [
     "Древесина", "Ром", "Ткань", "Зерно", "Смола", "Свежее мясо", "Вода", "Медь", "Уголь",
@@ -29,11 +40,35 @@ def fix_decimal(buy: float | None, sell: float | None) -> tuple[float | None, fl
 @dataclass
 class Good:
     name: str
-    buy: float | None
-    sell: float | None
-    stock: float | None
+    buy: float | None = None
+    sell: float | None = None
+    stock: float | None = None
     raw: str = ""
     warnings: list[str] = field(default_factory=list)
+    cells: dict = field(default_factory=dict)  # buy/sell/stock cells, recognized in one batch
+    raw_stock: str = ""
+    stock_text: str = ""  # what Windows OCR made of the "(168k)" word, used to cross-check the cell
+
+    def resolve(self):
+        """Turn the recognized cells into numbers once the batch has run."""
+        stock = self.cells.get("stock")
+        if stock is not None:
+            self.raw_stock = stock.text
+            self.stock = numocr.parse_number(stock.text)
+            # The cell sometimes loses the trailing "k"; the word read by Windows OCR then saves the day.
+            from_text = numocr.parse_number(self.stock_text)
+            if from_text and from_text >= 1000 and (self.stock is None or self.stock < 1000):
+                self.stock, self.raw_stock = from_text, self.stock_text
+        for attr in ("buy", "sell"):
+            c = self.cells.get(attr)
+            if c is None:
+                continue
+            value = numocr.parse_number(c.text)
+            setattr(self, attr, value)
+            if value is None:
+                self.warnings.append(f"{attr}: unreadable '{c.text}'")
+            elif c.score < 0.4:
+                self.warnings.append(f"{attr}: low confidence '{c.text}' ({c.score:.2f})")
 
 
 @dataclass
@@ -87,6 +122,39 @@ def canonical_good(text: str, extra_names=()) -> str | None:
     return text if re.fullmatch(r"[А-ЯЁ][а-яё]{2,}( [а-яё]{2,})?", text) else None
 
 
+_template = None
+
+
+def _get_template():
+    global _template
+    if _template is None:
+        _template = np.asarray(Image.open(HEADER_TEMPLATE).convert("L"))
+    return _template
+
+
+def find_header(img: Image.Image) -> tuple[float, float, float] | None:
+    """Position of the "Купить" header on a screenshot as (x, y, score), or None if no tooltip is open.
+    Searches a half-size copy first and only refines the winner at full size."""
+    tpl = _get_template()
+    gray = np.asarray(img.convert("L"))
+    if gray.shape[0] < tpl.shape[0] or gray.shape[1] < tpl.shape[1]:
+        return None
+    small = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    tpl_small = cv2.resize(tpl, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(small, tpl_small, cv2.TM_CCOEFF_NORMED))
+    if score < TPL_MIN_SCORE - 0.1:
+        return None
+    x, y = loc[0] * 2, loc[1] * 2
+    x0, y0 = max(0, x - 10), max(0, y - 10)
+    window = gray[y0:y + tpl.shape[0] + 10, x0:x + tpl.shape[1] + 10]
+    if window.shape[0] < tpl.shape[0] or window.shape[1] < tpl.shape[1]:
+        return None
+    _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(window, tpl, cv2.TM_CCOEFF_NORMED))
+    if score < TPL_MIN_SCORE:
+        return None
+    return x0 + loc[0] + TPL_PAD, y0 + loc[1] + TPL_PAD, score
+
+
 def _table_header(lines: list[Line]) -> tuple[Word, Word] | None:
     """The "Купить" / "Продать" column headers: the most reliable anchor of the tooltip
     ("Торговый дом" often gets merged with its icon by OCR)."""
@@ -97,8 +165,18 @@ def _table_header(lines: list[Line]) -> tuple[Word, Word] | None:
     return buy, sell
 
 
+def _box_around(x: float, y: float, h: float, size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Tooltip bounds from where its column header sits."""
+    # Tooltip spans ~14 text-heights left of "Купить" and ~17 right; header block above, up to ~12 goods below.
+    return (max(0, int(x - 14 * h)), max(0, int(y - 22 * h)),
+            min(size[0], int(x + 17 * h)), min(size[1], int(y + 20 * h)))
+
+
 def locate(img: Image.Image) -> tuple[int, int, int, int]:
     """Find the trade-house table on a full screenshot; return a crop box for the tooltip."""
+    found = find_header(img)
+    if found:
+        return _box_around(found[0], found[1], TPL_BUY_H, img.size)
     header = _table_header(ocr.recognize(img))
     if header is None:
         raise TooltipNotFound("port tooltip not found on screen")
@@ -112,12 +190,18 @@ def locate(img: Image.Image) -> tuple[int, int, int, int]:
     return left, top, right, bottom
 
 
-def parse(img: Image.Image, known_names=()) -> PortInfo:
-    """Parse a tooltip image (full screenshot or crop)."""
+def parse(img: Image.Image, known_names=(), header_hint: tuple[float, float] | None = None) -> PortInfo:
+    """Parse a tooltip image (full screenshot or crop). header_hint: position of "Купить" inside img,
+    used when OCR fails to read the header itself (a tooltip caught while fading in)."""
     lines = ocr.recognize(img, scale=2.0)
     warnings: list[str] = []
 
     header = _table_header(lines)
+    if header is None and header_hint:
+        x, y = header_hint
+        header = (Word("Купить", x, y, TPL_COL_GAP / 2, TPL_BUY_H),
+                  Word("Продать", x + TPL_COL_GAP, y, TPL_COL_GAP / 2, TPL_BUY_H))
+        warnings.append("header taken from the template match")
     if header is None:
         raise TooltipNotFound("trade table header not found")
     buy_hdr, sell_hdr = header
@@ -167,6 +251,7 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
     pitch = statistics.median([b - a for a, b in zip(centers, centers[1:])]) if len(centers) > 1 else 20
     half = pitch * 0.45
 
+    reader = numocr.BatchReader()
     goods: list[Good] = []
     for ws, cy in zip(rows, centers):
         vol_words = [w for w in ws if "(" in w.text or ")" in w.text]
@@ -176,43 +261,42 @@ def parse(img: Image.Image, known_names=()) -> PortInfo:
         if good_name is None:
             warnings.append(f"skipped row '{raw}'")
             continue
-        g = Good(good_name, None, None, None, raw)
+        g = Good(good_name, raw=raw)
 
         def cell(x0, x1):
-            box = (int(x0), int(cy - half), int(x1), int(cy + half))
-            text, score = numocr.read_cell(img.crop(box))
-            return text, score
+            return reader(img.crop((int(x0), int(cy - half), int(x1), int(cy + half))))
 
         if vol_words:
-            vx0 = min(w.x for w in vol_words) - 2
             # Windows OCR word boxes sometimes stop before "k)": read up to the price column instead.
-            vx1 = buy_hdr.x - 6
-            t, _ = cell(vx0, vx1)
-            g.stock = numocr.parse_number(t)
-            if g.stock is not None and g.stock < 1000:
-                g.warnings.append(f"stock: suspicious '{t}'")
-        for attr, x0 in (("buy", buy_hdr.x - 4), ("sell", sell_hdr.x - 4)):
-            t, score = cell(x0, x0 + col_gap - 10)
-            v = numocr.parse_number(t)
-            setattr(g, attr, v)
-            if v is None:
-                g.warnings.append(f"{attr}: unreadable '{t}'")
-            elif score < 0.4:
-                g.warnings.append(f"{attr}: low confidence '{t}' ({score:.2f})")
+            g.cells["stock"] = cell(min(w.x for w in vol_words) - 2, buy_hdr.x - 6)
+            g.stock_text = " ".join(w.text for w in vol_words)
+        g.cells["buy"] = cell(buy_hdr.x - 4, buy_hdr.x - 4 + col_gap - 10)
+        g.cells["sell"] = cell(sell_hdr.x - 4, sell_hdr.x - 4 + col_gap - 10)
+        goods.append(g)
+
+    reader.run()  # one recognition pass for every price cell of the tooltip
+    for g in goods:
+        g.resolve()
+        if g.stock is not None and g.stock < 1000:
+            g.warnings.append(f"stock: suspicious '{g.raw_stock}'")
         g.buy, g.sell, fixed = fix_decimal(g.buy, g.sell)
         if fixed:
             g.warnings.append(fixed)
         if g.buy is not None and g.sell is not None and g.sell > g.buy:
             g.warnings.append(f"sell {g.sell} > buy {g.buy}, suspicious")
-        goods.append(g)
-
     if not goods:
         warnings.append("no goods rows found")
     return PortInfo(name, tax, shallow, goods, warnings)
 
 
-def read_from_screenshot(img: Image.Image, known_names=()) -> tuple[PortInfo, Image.Image, tuple]:
-    """Returns (parsed info, tooltip crop, crop box in screenshot coords)."""
-    box = locate(img)
+def read_from_screenshot(img: Image.Image, known_names=(), found=None) -> tuple[PortInfo, Image.Image, tuple]:
+    """Returns (parsed info, tooltip crop, crop box in screenshot coords).
+    found: result of an earlier find_header(img), to avoid searching twice."""
+    found = found or find_header(img)
+    if found:
+        box = _box_around(found[0], found[1], TPL_BUY_H, img.size)
+        hint = (found[0] - box[0], found[1] - box[1])
+    else:
+        box, hint = locate(img), None
     crop = img.crop(box)
-    return parse(crop, known_names), crop, box
+    return parse(crop, known_names, hint), crop, box
