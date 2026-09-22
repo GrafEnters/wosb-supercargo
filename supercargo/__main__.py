@@ -3,6 +3,7 @@
   python -m supercargo              the logbook: ports are scanned automatically while you hover them
   python -m supercargo deals        print the best routes from saved prices
   python -m supercargo parse FILE   read a port tooltip off a screenshot file (debugging)
+  python -m supercargo selftest DIR read every screenshot in DIR into data/selftest.json (checks a build)
 """
 import argparse
 import sys
@@ -28,7 +29,7 @@ def print_port(info: tooltip.PortInfo):
 
 def main():
     ap = argparse.ArgumentParser(prog="supercargo")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "deals", "parse"])
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "deals", "parse", "selftest"])
     ap.add_argument("file", nargs="?")
     ap.add_argument("--sort", default="distance", choices=list(router.SORT_KEYS))
     ap.add_argument("--legs", type=int, default=2, choices=[1, 2])
@@ -39,6 +40,9 @@ def main():
 
     if args.command == "deals":
         print(router.format_routes(router.find_routes(Store().ports, args.sort, legs=args.legs), args.top))
+    elif args.command == "selftest":
+        from . import bench
+        bench.selftest([args.file], paths.data_file("selftest.json"))
     elif args.command == "parse":
         from PIL import Image
         info, _, _ = tooltip.read_from_screenshot(Image.open(args.file))

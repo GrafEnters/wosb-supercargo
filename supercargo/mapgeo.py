@@ -4,13 +4,15 @@ The map lies on a table seen at an angle, and its zoom and position differ betwe
 screenshot is matched against the clean top-down map (SIFT features + RANSAC homography). That gives
 an exact screen -> map transform for that very frame; it is used to place ports seen for the first time.
 
+OpenCV is only needed for that and is optional: the stand-alone build leaves it out (it is 110 MB),
+and locate() then returns None - every port already has a fixed spot in ports_layout.json anyway.
+
 Map coordinates are in grid cells: column A spans x 0..1, ... L spans 9..10 (no I/J);
 row 1 spans y 0..1, ... row 8 spans 7..8. Cells are square, so distances are in cells.
 """
 import threading
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -60,6 +62,8 @@ class _Matcher:
         self.sift = None
 
     def _init(self):
+        import cv2  # optional: see the module docstring
+        self.cv2 = cv2
         ref = Image.open(REFERENCE).convert("L")
         s = MATCH_PX_PER_CELL / REFERENCE_PX_PER_CELL
         ref = ref.resize((round(ref.width * s), round(ref.height * s)), Image.LANCZOS)
@@ -70,7 +74,11 @@ class _Matcher:
     def locate(self, img: Image.Image) -> MapGeometry | None:
         with self.lock:
             if self.sift is None:
-                self._init()
+                try:
+                    self._init()
+                except ImportError:
+                    return None
+            cv2 = self.cv2
             kp, desc = self.sift.detectAndCompute(np.asarray(img.convert("L")), None)
         if desc is None or len(kp) < MIN_INLIERS:
             return None

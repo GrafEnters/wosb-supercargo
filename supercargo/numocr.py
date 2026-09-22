@@ -1,4 +1,4 @@
-"""Digit recognition for small price/stock cells via RapidOCR (recognition model only).
+"""Digit recognition for small price/stock cells with the PP-OCRv3 recognizer (see textrec).
 
 Windows OCR is good at Russian words but drops short standalone numbers like "9";
 the PaddleOCR recognizer handles those reliably when fed one tight cell at a time.
@@ -15,8 +15,8 @@ _engine = None
 def _get_engine():
     global _engine
     if _engine is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _engine = RapidOCR()
+        from .textrec import Recognizer
+        _engine = Recognizer()
     return _engine
 
 
@@ -58,7 +58,7 @@ class BatchReader:
         if not self.images:
             return
         arrays = [np.ascontiguousarray(np.asarray(prep(im))[:, :, ::-1]) for im in self.images]
-        res, _ = _get_engine().text_recognizer(arrays)
+        res = _get_engine()(arrays)
         self.results = [(unicodedata.normalize("NFKC", t).strip(), float(score)) for t, score in res]
 
 
@@ -73,7 +73,7 @@ def parse_number(text: str) -> float | None:
     value = float(m.group(1).replace(",", ".").replace(":", "."))
     suffix = m.group(2).lower()
     if suffix in ("k", "к"):
-        value *= 1_000
+        value = float(round(value * 1_000))  # 64.1 * 1000 is 64099.999... in floating point
     elif suffix in ("m", "м"):
-        value *= 1_000_000
+        value = float(round(value * 1_000_000))
     return value

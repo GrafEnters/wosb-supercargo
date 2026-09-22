@@ -111,6 +111,7 @@ class App(tk.Tk):
         self.ship_xy = tuple(settings["ship_xy"]) if settings.get("ship_xy") else None
         self.zone_rank = tk.StringVar(value=str(settings.get("zone_rank", 6)))
         self.legs = tk.StringVar(value=str(settings.get("legs", 2)))
+        self.save_frames = tk.BooleanVar(value=settings.get("save_frames", False))
         self.placing_ship = False
         self.draft: list[tuple[float, float]] = []  # zone being drawn
         self.cursor_cell: tuple[float, float] | None = None
@@ -127,8 +128,10 @@ class App(tk.Tk):
         else:
             self.refresh_list()
             self.redraw()
-        AutoScanner(self.events, self.store.known_goods,
-                    lambda name: self.store.position(self.store.resolve_name(name)) is None).start()
+        self.scanner = AutoScanner(self.events, self.store.known_goods,
+                                   lambda name: self.store.position(self.store.resolve_name(name)) is None)
+        self.scanner.save_frames = bool(self.save_frames.get())
+        self.scanner.start()
         self.after(50, self.poll)
 
     # ---------- UI ----------
@@ -259,6 +262,8 @@ class App(tk.Tk):
         self.edit_btn.pack(side=tk.LEFT)
         self.zone_btn = Button(admin_btns, "Мелководье", self.toggle_zones)
         self.zone_btn.pack(side=tk.LEFT, padx=(8, 0))
+        Check(self.admin_frame, "сохранять кадры для тестов (data/frames)", self.save_frames,
+              self.on_save_frames, bg=WOOD).pack(anchor="w", pady=(6, 0))
         self.zone_panel = tk.Frame(self.admin_frame, bg=WOOD)
         chips = tk.Frame(self.zone_panel, bg=WOOD)
         chips.pack(anchor="w")
@@ -815,6 +820,10 @@ class App(tk.Tk):
         self.rebuild_nav(force=True)
         self.build_routes(animate=False) if self.mode == "routes" else self.redraw()
 
+    def on_save_frames(self):
+        self.scanner.save_frames = bool(self.save_frames.get())
+        self.save_settings()
+
     def on_plan_change(self):
         self.save_settings()
         self.build_routes(animate=False)
@@ -1032,7 +1041,7 @@ class App(tk.Tk):
             data = {"hold": int(self.hold.get()), "hold_overload": int(self.hold_overload.get()),
                     "ship_rank": self.rank, "zone_rank": int(self.zone_rank.get()),
                     "legs": int(self.legs.get()), "sort": self.sort.get(),
-                    "peace": bool(self.peace.get()),
+                    "peace": bool(self.peace.get()), "save_frames": bool(self.save_frames.get()),
                     "ship_xy": list(self.ship_xy) if self.ship_xy else None}
         except (tk.TclError, ValueError):
             return False

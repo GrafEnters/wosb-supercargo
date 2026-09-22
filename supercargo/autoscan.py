@@ -12,7 +12,7 @@ import traceback
 import numpy as np
 from PIL import Image
 
-from . import capture, mapgeo, sound, tooltip
+from . import capture, mapgeo, paths, sound, tooltip
 
 POLL = 0.1  # s between cursor checks
 MOVE_TOLERANCE = 6  # px of jitter that still counts as "cursor stopped"
@@ -40,6 +40,7 @@ class AutoScanner(threading.Thread):
         self.hwnd_checked = 0.0
         self.last_name, self.last_time = None, 0.0
         self.last_header = None  # where the tooltip we read last sat on screen
+        self.save_frames = False  # admin: keep every frame a tooltip was read from, to test recognition on
 
     def run(self):
         user32 = ctypes.windll.user32
@@ -88,11 +89,14 @@ class AutoScanner(threading.Thread):
         try:
             info, _, _ = tooltip.read_from_screenshot(img, self.known_goods(), found)
         except tooltip.TooltipNotFound:
+            self.keep_frame(img, "unread")
             return "retry"
         if not info.goods:
+            self.keep_frame(img, "unread")
             return "retry"
         if info.name == self.last_name and time.time() - self.last_time < SAME_PORT_COOLDOWN:
             return "done"
+        self.keep_frame(img, info.name)
         map_xy = None
         if self.needs_position(info.name):
             geo = mapgeo.locate(img)
@@ -102,3 +106,15 @@ class AutoScanner(threading.Thread):
         self.out.put(("scan", info, map_xy))
         sound.chime()
         return "done"
+
+    def keep_frame(self, img: Image.Image, label: str):
+        """Test material: the whole frame, lossless (JPEG artefacts would change what OCR sees)."""
+        if not self.save_frames:
+            return
+        try:
+            folder = paths.DATA / "frames"
+            folder.mkdir(parents=True, exist_ok=True)
+            safe = "".join(ch if ch.isalnum() or ch in " -" else "_" for ch in label)
+            img.save(folder / f"{safe}_{int(time.time() * 1000)}.png", compress_level=1)
+        except OSError:
+            pass

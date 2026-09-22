@@ -1,11 +1,15 @@
-"""Build the stand-alone Supercargo (no Python needed on the player's PC) and zip it for a release.
+"""Build the stand-alone Supercargo (no Python needed on the player's PC), check it, zip it for a release.
 
     .venv\\Scripts\\python -m pip install pyinstaller
     .venv\\Scripts\\python build.py
 
-Result: dist/Supercargo/Supercargo.exe and dist/Supercargo-<version>.zip
+Result: dist/Supercargo/Supercargo.exe and dist/Supercargo-<version>.zip.
+If there are test screenshots (data/frames, data/bench), the built .exe reads them all and every field is
+compared with what the source code reads - the build fails on any difference.
 """
+import json
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -13,8 +17,11 @@ from pathlib import Path
 import PyInstaller.__main__
 
 import supercargo
+from supercargo import bench, textrec
 
 ROOT = Path(__file__).resolve().parent
+DIST = ROOT / "dist"
+APP = DIST / "Supercargo"
 SITE = Path(sys.prefix) / "Lib" / "site-packages"
 # winrt ships an old msvcp140.dll (VS 2019). Loaded first, it crashes onnxruntime, which wants a newer
 # one - both inside PyInstaller's analysis and in the built app. With it out of the way the bundle
@@ -22,6 +29,13 @@ SITE = Path(sys.prefix) / "Lib" / "site-packages"
 WINRT_MSVCP = SITE / "winrt" / "msvcp140.dll"
 
 ASSETS = ["background_map.png", "header_tpl.png", "icon.ico", "goods.json", "ports_layout.json", "shallows.json"]
+# Big libraries the source version uses but the player's build does without:
+#   cv2 - only places brand-new ports on the map (all known ports have fixed spots); 110 MB
+#   rapidocr_onnxruntime (+ shapely, pyclipper, yaml) - we run its recognition model ourselves (textrec)
+#   _ssl/_hashlib - no network, no OpenSSL (5 MB); PIL._avif - no AVIF images (7.5 MB)
+EXCLUDE = ["cv2", "rapidocr_onnxruntime", "shapely", "pyclipper", "yaml", "_ssl", "ssl", "_hashlib",
+           "PIL._avif", "PIL.AvifImagePlugin", "unittest", "pydoc", "numpy.f2py", "onnxruntime.transformers",
+           "onnxruntime.tools", "onnxruntime.quantization"]
 
 
 def build():
@@ -30,15 +44,17 @@ def build():
         "--noconfirm", "--clean", "--windowed",
         "--name", "Supercargo",
         "--icon", str(ROOT / "supercargo" / "icon.ico"),
-        "--distpath", str(ROOT / "dist"),
+        "--distpath", str(DIST),
         "--workpath", str(ROOT / "build"),
         "--specpath", str(ROOT / "build"),
-        "--collect-all", "rapidocr_onnxruntime",  # models and config.yaml live inside the package
         "--collect-all", "winrt",  # Windows OCR bindings are namespace packages PyInstaller can't see
         "--collect-binaries", "onnxruntime",
+        "--add-data", f"{textrec.model_path()};supercargo/models",
     ]
     for name in ASSETS:
         args += ["--add-data", f"{ROOT / 'supercargo' / name};supercargo"]
+    for module in EXCLUDE:
+        args += ["--exclude-module", module]
     aside = WINRT_MSVCP.with_suffix(".dll.aside")
     if WINRT_MSVCP.exists():
         WINRT_MSVCP.rename(aside)
@@ -47,6 +63,40 @@ def build():
     finally:
         if aside.exists():
             aside.rename(WINRT_MSVCP)
+
+
+def check() -> bool:
+    """The built .exe must read every test screenshot exactly as the source code does: same port, tax,
+    shallows, goods, prices and stock, field by field. Accuracy against hand-checked answers is shown too."""
+    folders = [p for p in (ROOT / "data" / "frames", ROOT / "data" / "bench") if p.is_dir()]
+    if not folders:
+        print("самопроверка пропущена: нет тестовых кадров (data/frames, data/bench)")
+        return True
+    source, _ = bench.read_all(bench.frames_in(folders))
+    built, times = {}, []
+    out = APP / "data" / "selftest.json"
+    for folder in folders:
+        subprocess.run([str(APP / "Supercargo.exe"), "selftest", str(folder)], check=True, timeout=900)
+        part = json.loads(out.read_text(encoding="utf-8"))
+        built.update(part["results"])
+        times += part["times"]
+    total, diffs = bench.score(source, built)
+    truth_path = ROOT / "data" / "truth.json"
+    if truth_path.exists():
+        truth = json.loads(truth_path.read_text(encoding="utf-8"))
+        t_total, errors = bench.score(truth, built)
+        print(f"точность .exe по выверенным ответам: {t_total - len(errors)}/{t_total} полей")
+    finds = sorted(t["find"] * 1000 for t in times)
+    totals = sorted(t["total"] * 1000 for t in times)
+    print(f"самопроверка .exe: кадров {len(built)}, сверено с исходниками полей {total}, "
+          f"расхождений {len(diffs)}; поиск подсказки {finds[len(finds) // 2]:.0f} мс, "
+          f"разбор {totals[len(totals) // 2]:.0f} мс (медианы)")
+    for d in diffs:
+        print("   ", d)
+    shutil.rmtree(APP / "data", ignore_errors=True)  # the player's archive starts with an empty logbook
+    return not diffs
+
+
 
 
 README_TXT = """СУПЕРКАРГО {version} — судовой журнал торговца для World of Sea Battle
@@ -76,24 +126,26 @@ README_TXT = """СУПЕРКАРГО {version} — судовой журнал �
 
 
 def package() -> Path:
-    app = ROOT / "dist" / "Supercargo"
-    shutil.copy(ROOT / "LICENSE", app / "LICENSE.txt")
+    shutil.copy(ROOT / "LICENSE", APP / "LICENSE.txt")
     # Notepad-friendly: README.md is GitHub markup with pictures that are not in the archive
-    (app / "README.txt").write_text(README_TXT.format(version=supercargo.__version__), encoding="utf-8-sig")
-    for stale in ("README.md", "LICENSE"):
-        (app / stale).unlink(missing_ok=True)
-    out = ROOT / "dist" / f"Supercargo-{supercargo.__version__}.zip"
+    (APP / "README.txt").write_text(README_TXT.format(version=supercargo.__version__), encoding="utf-8-sig")
+    out = DIST / f"Supercargo-{supercargo.__version__}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for f in sorted(app.rglob("*")):
+        for f in sorted(APP.rglob("*")):
             if f.is_file():
-                z.write(f, Path("Supercargo") / f.relative_to(app))
+                z.write(f, Path("Supercargo") / f.relative_to(APP))
     return out
+
+
+def sizes() -> str:
+    unpacked = sum(f.stat().st_size for f in APP.rglob("*") if f.is_file())
+    return f"{unpacked / 2**20:.0f} МБ распакованной"
 
 
 if __name__ == "__main__":
     if "--package-only" not in sys.argv:
         build()
+    ok = check()
     zip_path = package()
-    size = sum(f.stat().st_size for f in (ROOT / "dist" / "Supercargo").rglob("*") if f.is_file())
-    print(f"\nГотово: {zip_path.name}  ({zip_path.stat().st_size / 2**20:.0f} МБ в архиве, "
-          f"{size / 2**20:.0f} МБ распакованной)")
+    print(f"\nГотово: {zip_path.name}  ({zip_path.stat().st_size / 2**20:.0f} МБ в архиве, {sizes()})")
+    sys.exit(0 if ok else 1)

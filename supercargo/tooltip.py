@@ -5,11 +5,10 @@ import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image
 
-from . import numocr, ocr
+from . import match, numocr, ocr
 from .ocr import Line, Word
 
 # The "Купить / Продать" header is drawn from the same pixels every time, so template matching finds
@@ -134,25 +133,15 @@ def _get_template():
 
 def find_header(img: Image.Image) -> tuple[float, float, float] | None:
     """Position of the "Купить" header on a screenshot as (x, y, score), or None if no tooltip is open.
-    Searches a half-size copy first and only refines the winner at full size."""
+    Searched coarse-to-fine (quarter, half, full size) - see match.find."""
     tpl = _get_template()
     gray = np.asarray(img.convert("L"))
     if gray.shape[0] < tpl.shape[0] or gray.shape[1] < tpl.shape[1]:
         return None
-    small = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-    tpl_small = cv2.resize(tpl, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-    _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(small, tpl_small, cv2.TM_CCOEFF_NORMED))
-    if score < TPL_MIN_SCORE - 0.1:
-        return None
-    x, y = loc[0] * 2, loc[1] * 2
-    x0, y0 = max(0, x - 10), max(0, y - 10)
-    window = gray[y0:y + tpl.shape[0] + 10, x0:x + tpl.shape[1] + 10]
-    if window.shape[0] < tpl.shape[0] or window.shape[1] < tpl.shape[1]:
-        return None
-    _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(window, tpl, cv2.TM_CCOEFF_NORMED))
+    score, x, y = match.find(gray, tpl)
     if score < TPL_MIN_SCORE:
         return None
-    return x0 + loc[0] + TPL_PAD, y0 + loc[1] + TPL_PAD, score
+    return x + TPL_PAD, y + TPL_PAD, score
 
 
 def _table_header(lines: list[Line]) -> tuple[Word, Word] | None:
