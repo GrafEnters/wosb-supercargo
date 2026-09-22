@@ -28,7 +28,9 @@ from .theme import (AMBER, BRASS, BRASS_DARK, BRASS_LIGHT, F_HEAD, F_MAP, F_MAP_
                     WOOD_LIGHT, Button, Check, Chip, Divider, Field, ThinScrollbar, mix, wood_texture)
 
 HERE = Path(__file__).resolve().parent
-BACKGROUND = HERE / "background_map.png"  # clean top-down map, VIEW_PX_PER_CELL px per cell
+# Clean top-down map, VIEW_PX_PER_CELL px per cell. The stand-alone build carries a JPEG copy (1.4 MB lighter).
+BACKGROUND = next((p for p in (HERE / "background_map.jpg", HERE / "background_map.png") if p.exists()),
+                  HERE / "background_map.png")
 ICON = HERE / "icon.ico"
 SETTINGS = paths.DATA / "settings.json"
 

@@ -12,8 +12,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from supercargo import numocr, paths, textrec, tooltip
-from tests.recognition import collect
+from supercargo import bench, numocr, paths, textrec, tooltip
 
 
 def cells_of(img: Image.Image) -> list[Image.Image]:
@@ -45,7 +44,7 @@ def main():
 
     reference = RapidOCR().text_recognizer
     ours = textrec.Recognizer()
-    files = collect([paths.DATA / "frames", *args.frames])
+    files = bench.frames_in([paths.DATA / "frames", *args.frames])
     total = same_text = 0
     worst = 0.0
     for f in files:
