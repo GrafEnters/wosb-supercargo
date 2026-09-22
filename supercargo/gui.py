@@ -19,7 +19,7 @@ from tkinter import messagebox
 import numpy as np
 from PIL import Image, ImageTk
 
-from . import mapgeo, navigation, router
+from . import mapgeo, navigation, paths, router
 from .autoscan import AutoScanner
 from .store import Store
 from .theme import (AMBER, BRASS, BRASS_DARK, BRASS_LIGHT, F_HEAD, F_MAP, F_MAP_SMALL, F_NUM, F_NUM_SMALL,
@@ -30,7 +30,7 @@ from .theme import (AMBER, BRASS, BRASS_DARK, BRASS_LIGHT, F_HEAD, F_MAP, F_MAP_
 HERE = Path(__file__).resolve().parent
 BACKGROUND = HERE / "background_map.png"  # clean top-down map, VIEW_PX_PER_CELL px per cell
 ICON = HERE / "icon.ico"
-SETTINGS = HERE.parent / "data" / "settings.json"
+SETTINGS = paths.DATA / "settings.json"
 
 SORT_LABELS = {"distance": "на клетку пути", "trip": "за рейс"}
 LEG_LABELS = {"1": "1 переход", "2": "2 перехода"}
@@ -86,7 +86,7 @@ class App(tk.Tk):
         self.minsize(1100, 700)
         self.configure(bg=WOOD)
         try:
-            self.iconbitmap(str(ICON))
+            self.iconbitmap(default=str(ICON))  # default=: dialogs get the anchor too
         except tk.TclError:
             pass
         self.store = Store()
@@ -1098,11 +1098,12 @@ class App(tk.Tk):
 def run():
     import ctypes
     import sys
-    # Started with pythonw (no console): keep prints and tracebacks in a log file.
-    if sys.stdout is None or sys.stderr is None:
-        (HERE.parent / "data").mkdir(exist_ok=True)  # a fresh copy has no data folder yet
-        log = open(HERE.parent / "data" / "supercargo.log", "a", encoding="utf-8", buffering=1)
-        sys.stdout = sys.stderr = log
+    # Own taskbar identity: otherwise Windows files the window under pythonw.exe and shows the Python icon.
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GrafEnters.Supercargo")
+    except (AttributeError, OSError):
+        pass
+    paths.redirect_output_to_log()
     # One instance only: a second scanner would just double every scan.
     ctypes.windll.kernel32.CreateMutexW(None, False, "supercargo-wosb-single-instance")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS

@@ -65,13 +65,3 @@ def grab(rect) -> Image.Image:
         shot = sct.grab({"left": left, "top": top, "width": w, "height": h})
     return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
-
-def grab_game():
-    """Returns (image of game client area, (left, top) offset, cursor pos relative to image)."""
-    hwnd = find_game_window()
-    if not hwnd:
-        raise RuntimeError("World of Sea Battle window not found")
-    rect = client_rect(hwnd)
-    img = grab(rect)
-    cx, cy = cursor_pos()
-    return img, (rect[0], rect[1]), (cx - rect[0], cy - rect[1])

@@ -5,7 +5,9 @@ import wave
 import winsound
 from pathlib import Path
 
-CHIME = Path(__file__).resolve().parent.parent / "data" / "chime.wav"
+from . import paths
+
+CHIME = paths.DATA / "chime.wav"
 RATE = 44100
 
 

@@ -8,7 +8,6 @@ Shortest paths are computed on a visibility graph: the corners of the blocking z
 Between two points that see each other the ship sails straight, so the shortest route around the
 polygons always bends over their corners.
 """
-import heapq
 import json
 import math
 import re
@@ -288,22 +287,3 @@ class Navigator:
             guard += 1
         return out
 
-
-def dijkstra(weights: np.ndarray, source: int) -> list[float]:
-    """Kept for tests: plain Dijkstra over the same weight matrix."""
-    n = len(weights)
-    dist = [math.inf] * n
-    dist[source] = 0.0
-    seen = [False] * n
-    heap = [(0.0, source)]
-    while heap:
-        d, u = heapq.heappop(heap)
-        if seen[u]:
-            continue
-        seen[u] = True
-        for v in range(n):
-            w = weights[u, v]
-            if math.isfinite(w) and d + w < dist[v]:
-                dist[v] = d + w
-                heapq.heappush(heap, (dist[v], v))
-    return dist

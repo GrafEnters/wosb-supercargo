@@ -4,10 +4,10 @@ import json
 import time
 from pathlib import Path
 
-from . import layout
+from . import layout, paths
 from .tooltip import PortInfo
 
-DEFAULT_PATH = Path(__file__).resolve().parent.parent / "data" / "market.json"
+DEFAULT_PATH = paths.DATA / "market.json"
 
 
 class Store:

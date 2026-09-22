@@ -9,7 +9,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-2b4a7a?style=flat-square" alt="Windows 10 | 11">
-  <img src="https://img.shields.io/badge/Python-3.13-c8a24a?style=flat-square" alt="Python 3.13">
+  <a href="https://github.com/GrafEnters/wosb-supercargo/releases/latest"><img src="https://img.shields.io/github/v/release/GrafEnters/wosb-supercargo?style=flat-square&color=c8a24a&label=%D1%81%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C" alt="скачать"></a>
   <img src="https://img.shields.io/badge/license-MIT-8f7f6a?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/%D0%BD%D0%B5%20%D1%87%D0%B8%D1%82-%D1%82%D0%BE%D0%BB%D1%8C%D0%BA%D0%BE%20%D1%81%D0%BA%D1%80%D0%B8%D0%BD%D1%88%D0%BE%D1%82%D1%8B-2f6f5e?style=flat-square" alt="не чит — только скриншоты">
 </p>
@@ -58,12 +58,24 @@
 
 ## Установка
 
-1. Поставь **[Python 3.13](https://www.python.org/downloads/)**. В установщике отметь галочку **«Add python.exe to PATH»**.
-2. Скачай Суперкарго: зелёная кнопка **Code → Download ZIP** и распакуй куда удобно.
-3. Запусти **`install.bat`** — он всё поставит сам, это около минуты.
-4. Готово! Запускай ярлык **«Суперкарго»**, который появится в той же папке.
+Ничего ставить не нужно — ни Python, ни библиотек.
+
+1. Скачай архив **`Supercargo-…zip`** со страницы **[Releases](https://github.com/GrafEnters/wosb-supercargo/releases/latest)**.
+2. Распакуй куда удобно.
+3. Запускай **`Supercargo.exe`**. Готово!
 
 > Русский язык для распознавания текста уже встроен в Windows, отдельно ничего качать не нужно.
+
+<details>
+<summary><b>Из исходников</b> — для тех, кто хочет покопаться в коде</summary>
+
+<br>
+
+1. Поставь **[Python 3.13](https://www.python.org/downloads/)** с галочкой **«Add python.exe to PATH»**.
+2. **Code → Download ZIP**, распакуй и запусти **`install.bat`** — он поставит библиотеки и сделает ярлык «Суперкарго».
+3. Собрать свой `.exe`: `.venv\Scripts\python -m pip install pyinstaller`, потом `.venv\Scripts\python build.py`.
+
+</details>
 
 ## Первый рейс
 
@@ -84,7 +96,9 @@
 
 **Игра в другом разрешении.** Проверено на 1920×1080. В другом разрешении Суперкарго переключится на запасной способ поиска подсказки — он медленнее, но должен справиться. Если нет — напиши мне.
 
-**Где мои данные.** В папке `data` рядом с программой. Удалишь её — Суперкарго начнёт с чистого журнала.
+**Windows пишет «Система Windows защитила ваш компьютер».** Так SmartScreen встречает любую программу без платной цифровой подписи. Нажми **«Подробнее» → «Выполнить в любом случае»**. Весь код открыт здесь же, можно проверить.
+
+**Где мои данные.** В папке `data` рядом с программой. Удалишь её — Суперкарго начнёт с чистого журнала. Новую версию можно распаковать поверх старой: журнал сохранится.
 
 </details>
 

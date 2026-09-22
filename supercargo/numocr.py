@@ -27,14 +27,6 @@ def prep(img: Image.Image, lo: int = 60, hi: int = 200) -> Image.Image:
     return Image.fromarray(255 - a.astype(np.uint8)).convert("RGB")
 
 
-def read_cell(img: Image.Image) -> tuple[str, float]:
-    """Recognize a single-line crop. Returns (text, confidence)."""
-    arr = np.asarray(prep(img))[:, :, ::-1]  # RGB -> BGR
-    res, _ = _get_engine().text_recognizer([np.ascontiguousarray(arr)])
-    text, score = res[0]
-    return unicodedata.normalize("NFKC", text).strip(), float(score)
-
-
 class Cell:
     """A price cell queued for recognition; text and score appear after BatchReader.run()."""
 
