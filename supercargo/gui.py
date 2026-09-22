@@ -45,7 +45,7 @@ def short(port: str) -> str:
 
 
 def fmt_units(n: float) -> str:
-    return f"{n:,.0f}".replace(",", " ")
+    return f"{n:,.0f}".replace(",", " ")  # no-break space: "40 000" never splits across lines
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -662,8 +662,8 @@ class App(tk.Tk):
                 t.insert(tk.END, f"{parts}прибыль +{money(r.profit)} · вложить {money(r.capital)}\n", ("sum", blk))
                 for n, leg in enumerate(r.legs, 1):
                     if len(r.legs) > 1:
-                        t.insert(tk.END, f"{n}. {short(leg.src)} → {short(leg.dst)}   +{money(leg.plan.profit)}"
-                                         f"   груз {fmt_units(leg.plan.weight)}\n", ("leg", blk))
+                        t.insert(tk.END, f"{n}. {short(leg.src)} → {short(leg.dst)}   +{money(leg.plan.profit)}\n",
+                                 ("leg", blk))
                     for it in leg.plan.items:
                         batches = f"{it.batches} {plural(it.batches, 'партия', 'партии', 'партий')}"
                         t.insert(tk.END, f"{it.good:<12}{fmt_units(it.units):>8} шт  {batches:<9} +{money(it.profit)}\n",
@@ -1100,6 +1100,7 @@ def run():
     import sys
     # Started with pythonw (no console): keep prints and tracebacks in a log file.
     if sys.stdout is None or sys.stderr is None:
+        (HERE.parent / "data").mkdir(exist_ok=True)  # a fresh copy has no data folder yet
         log = open(HERE.parent / "data" / "supercargo.log", "a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stderr = log
     # One instance only: a second scanner would just double every scan.
