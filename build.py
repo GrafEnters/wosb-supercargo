@@ -49,10 +49,39 @@ def build():
             aside.rename(WINRT_MSVCP)
 
 
+README_TXT = """СУПЕРКАРГО {version} — судовой журнал торговца для World of Sea Battle
+
+Как пользоваться
+  1. Запусти игру и Supercargo.exe.
+  2. Выбери ранг своего корабля и отметь, где он стоит.
+  3. В игре открой карту мира и задерживай курсор на портах —
+     каждый записанный порт получает зелёную галочку.
+  4. Когда все порты в описи, Суперкарго сам проложит лучшие курсы.
+
+Это не чит: программа только делает скриншот окна и читает с него текст,
+как OBS. В память игры, её файлы и сетевой трафик она не лезет.
+
+Если Windows пишет «Система Windows защитила ваш компьютер» —
+нажми «Подробнее» → «Выполнить в любом случае».
+
+Журнал хранится в папке data рядом с программой. Новую версию можно
+распаковать поверх старой — журнал сохранится.
+
+Вопросы, идеи, баги: Telegram https://t.me/Graf_Enters
+Друзья в игре: ник GrafEnters, гильдия [ZGS]
+Код и новые версии: https://github.com/GrafEnters/wosb-supercargo
+
+Попутного ветра и полных трюмов!
+"""
+
+
 def package() -> Path:
     app = ROOT / "dist" / "Supercargo"
-    for name in ("README.md", "LICENSE"):
-        shutil.copy(ROOT / name, app / name)
+    shutil.copy(ROOT / "LICENSE", app / "LICENSE.txt")
+    # Notepad-friendly: README.md is GitHub markup with pictures that are not in the archive
+    (app / "README.txt").write_text(README_TXT.format(version=supercargo.__version__), encoding="utf-8-sig")
+    for stale in ("README.md", "LICENSE"):
+        (app / stale).unlink(missing_ok=True)
     out = ROOT / "dist" / f"Supercargo-{supercargo.__version__}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for f in sorted(app.rglob("*")):
@@ -62,7 +91,8 @@ def package() -> Path:
 
 
 if __name__ == "__main__":
-    build()
+    if "--package-only" not in sys.argv:
+        build()
     zip_path = package()
     size = sum(f.stat().st_size for f in (ROOT / "dist" / "Supercargo").rglob("*") if f.is_file())
     print(f"\nГотово: {zip_path.name}  ({zip_path.stat().st_size / 2**20:.0f} МБ в архиве, "
