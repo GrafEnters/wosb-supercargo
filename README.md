@@ -10,6 +10,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-2b4a7a?style=flat-square" alt="Windows 10 | 11">
   <img src="https://img.shields.io/badge/Python-3.13-c8a24a?style=flat-square" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/license-MIT-8f7f6a?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/%D0%BD%D0%B5%20%D1%87%D0%B8%D1%82-%D1%82%D0%BE%D0%BB%D1%8C%D0%BA%D0%BE%20%D1%81%D0%BA%D1%80%D0%B8%D0%BD%D1%88%D0%BE%D1%82%D1%8B-2f6f5e?style=flat-square" alt="не чит — только скриншоты">
 </p>
 
@@ -93,5 +94,7 @@
 
 - 💬 Любые вопросы, идеи и найденные баги — пиши в Telegram: **[@Graf_Enters](https://t.me/Graf_Enters)**
 - 🤝 Добавляйся в друзья в игре: ник **GrafEnters**, гильдия **[ZGS]**
+
+Код открыт под [лицензией MIT](LICENSE): бери, меняй, делись.
 
 <p align="center"><i>Попутного ветра и полных трюмов!</i> ⚓</p>
